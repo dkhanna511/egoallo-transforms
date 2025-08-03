@@ -1,0 +1,47 @@
+
+# Explicitly ignore common unwanted files
+*.pth
+*.tar
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tiff
+*.webp
+*.heic
+
+*.csv
+*.csv.gz
+*.txt
+*.json
+*.jsonl
+*.yaml
+*.yml
+
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.flv
+*.wmv
+*.webm
+
+# Ignore any other common large files
+*.zip
+*.gz
+*.tar.gz
+*.7z
+*.rar
+*.h5
+*.npz
+*.npy
+
+# Ignore Jupyter notebooks (if not needed)
+*.ipynb
+
+# Ignore cache, logs, and OS-specific files
+__pycache__/
+*.log
+*.DS_Store
+Thumbs.db
