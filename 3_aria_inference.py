@@ -70,7 +70,7 @@ def main(args: Args) -> None:
     if traj_paths.splat_path is not None:
         print("Found splat at", traj_paths.splat_path)
     else:
-        print("No scene splat found.")
+        print("No scene splat found. helloooo")
     # Get point cloud + floor.
     points_data, floor_z = load_point_cloud_and_find_ground(traj_paths.points_path)
 
@@ -78,7 +78,7 @@ def main(args: Args) -> None:
     transforms = InferenceInputTransforms.load(
         traj_paths.vrs_file, traj_paths.slam_root_dir, fps=30
     ).to(device=device)
-
+    # exit(0)
     # Note the off-by-one for Ts_world_cpf, which we need for relative transform computation.
     Ts_world_cpf = (
         SE3(
@@ -92,6 +92,8 @@ def main(args: Args) -> None:
             )
         )
     ).parameters()
+    print("here?")
+    # exit(0)
     pose_timestamps_sec = transforms.pose_timesteps[
         args.start_index + 1 : args.start_index + args.traj_length + 1
     ]
@@ -108,8 +110,8 @@ def main(args: Args) -> None:
         ).to(device)
     else:
         print("No hand detections found.")
-        hamer_detections = None
-
+        hamer_detections= None
+    print("now here?")
     # Get temporally corresponded Aria wrist and palm estimates.
     if traj_paths.wrist_and_palm_poses_csv is not None:
         aria_detections = CorrespondedAriaHandWristPoseDetections.load(
@@ -122,7 +124,8 @@ def main(args: Args) -> None:
         aria_detections = None
 
     print(f"{Ts_world_cpf.shape=}")
-
+    
+    
     server = None
     if args.visualize_traj:
         server = viser.ViserServer()
@@ -144,7 +147,8 @@ def main(args: Args) -> None:
         device=device,
         floor_z=floor_z,
     )
-
+    print(" ab here?")
+    exit(0)
     # Save outputs in case we want to visualize later.
     if args.save_traj:
         save_name = (

@@ -58,51 +58,40 @@ def align_timestamps(frames_df, imu_df):
     print(f"Aligned {len(aligned_imu_df)} IMU samples to frames")
     return aligned_imu_df
 
-def compute_velocities_from_world_poses(positions, quaternions, timestamps):
+
+def compute_linear_velocity_device_frame(positions, quaternions, timestamps):
     """
-    Compute linear and angular velocities from camera-to-world poses.
-    
-    Note: positions and quaternions are camera-to-world (device-to-world).
-    We compute velocities in world frame, then transform to device frame.
+    Compute linear velocities in the device coordinate frame from camera-to-world poses.
+
+    Args:
+        positions: (N,3) numpy array of translations [tx,ty,tz] in meters
+        quaternions: (N,4) numpy array of quaternions [qx,qy,qz,qw]
+        timestamps: (N,) numpy array of timestamps (ns, us, ms, or s)
+
+    Returns:
+        device_linear_velocities: (N,3) linear velocities in device frame [m/s]
     """
-    
-    print("Computing velocities from camera-to-world poses...")
-    
-    # Debug timestamp information
-    print(f"Raw timestamp range: {timestamps[0]} to {timestamps[-1]}")
-    print(f"Raw timestamp sample: {timestamps[:5]}")
-    
-    # Detect timestamp units automatically
+    print("=== Computing device-frame linear velocities ===")
+
+    # --- Timestamp normalization ---
     timestamp_range = timestamps[-1] - timestamps[0]
-    if timestamp_range > 1e12:  # Likely nanoseconds
-        print("Detected nanoseconds - converting to seconds")
-        timestamps_sec = timestamps / 1e9
-    elif timestamp_range > 1e9:  # Likely microseconds  
-        print("Detected microseconds - converting to seconds")
-        timestamps_sec = timestamps / 1e6
-    elif timestamp_range > 1e6:  # Likely milliseconds
-        print("Detected milliseconds - converting to seconds") 
-        timestamps_sec = timestamps / 1e3
-    else:  # Likely already in seconds
-        print("Assuming timestamps already in seconds")
+    if timestamp_range > 1e12:
+        timestamps_sec = timestamps / 1e9  # ns → s
+        print("Detected nanoseconds - converted to seconds")
+    elif timestamp_range > 1e9:
+        timestamps_sec = timestamps / 1e6  # µs → s
+        print("Detected microseconds - converted to seconds")
+    elif timestamp_range > 1e6:
+        timestamps_sec = timestamps / 1e3  # ms → s
+        print("Detected milliseconds - converted to seconds")
+    else:
         timestamps_sec = timestamps
-    
-    print(f"Converted timestamp range: {timestamps_sec[0]:.3f} to {timestamps_sec[-1]:.3f} seconds")
-    print(f"Total duration: {timestamps_sec[-1] - timestamps_sec[0]:.3f} seconds")
-    
-    # Debug position information
-    print(f"Camera position range X: {np.min(positions[:, 0]):.3f} to {np.max(positions[:, 0]):.3f}")
-    print(f"Camera position range Y: {np.min(positions[:, 1]):.3f} to {np.max(positions[:, 1]):.3f}")
-    print(f"Camera position range Z: {np.min(positions[:, 2]):.3f} to {np.max(positions[:, 2]):.3f}")
-    
-    # Check for reasonable position values (should be in meters, typically < 1000)
-    max_pos = np.max(np.abs(positions))
-    if max_pos > 1000:
-        print(f"Warning: Large position values detected ({max_pos:.1f}). Positions might be in mm or other units.")
-    
-    # Compute linear velocities in world frame using numerical differentiation
+        print("Assuming timestamps already in seconds")
+
+    print(f"Timestamps: {timestamps_sec[0]:.6f} → {timestamps_sec[-1]:.6f}, duration {timestamps_sec[-1]-timestamps_sec[0]:.3f} s")
+
+    # --- Compute linear velocity in world frame ---
     world_linear_velocities = np.zeros_like(positions)
-    
     dt_values = []
     for i in range(1, len(positions)):
         dt = timestamps_sec[i] - timestamps_sec[i-1]
@@ -110,71 +99,35 @@ def compute_velocities_from_world_poses(positions, quaternions, timestamps):
         if dt > 0:
             world_linear_velocities[i] = (positions[i] - positions[i-1]) / dt
         else:
-            world_linear_velocities[i] = world_linear_velocities[i-1] if i > 1 else [0, 0, 0]
-    
-    # Debug time differences and velocities
+            world_linear_velocities[i] = world_linear_velocities[i-1]
+    world_linear_velocities[0] = world_linear_velocities[1]
+
+    # --- Debug sanity checks ---
     dt_values = np.array(dt_values)
-    print(f"Time step statistics:")
-    print(f"  Mean dt: {np.mean(dt_values):.6f} seconds")
-    print(f"  Min dt: {np.min(dt_values):.6f} seconds") 
-    print(f"  Max dt: {np.max(dt_values):.6f} seconds")
-    
-    # Check first few computed velocities
+    print("dt statistics:")
+    print(f"  Mean dt: {np.mean(dt_values):.6f} s")
+    print(f"  Min dt: {np.min(dt_values):.6f} s")
+    print(f"  Max dt: {np.max(dt_values):.6f} s")
     vel_magnitudes = np.linalg.norm(world_linear_velocities[1:6], axis=1)
-    print(f"First 5 velocity magnitudes: {vel_magnitudes}")
-    	
-    if np.any(vel_magnitudes > 100):  # Velocities > 100 m/s are unrealistic
-        print("ERROR: Computed velocities are unrealistically high!")
-        print("This usually indicates timestamp or position unit issues.")
-        
-        # Suggest fixes
+    print(f"First 5 world velocity magnitudes: {vel_magnitudes}")
+
+    if np.any(vel_magnitudes > 100):
+        print("WARNING: Unrealistically high velocities detected")
         if np.mean(dt_values) < 1e-6:
-            print("SUGGESTION: Timestamps might be in wrong units (too small dt)")
+            print("  → Timestamps may be in the wrong units")
         if np.max(np.abs(positions)) > 1000:
-            print("SUGGESTION: Positions might be in mm instead of meters")
-    
-    # Set first frame velocity to second frame (or zero)
-    world_linear_velocities[0] = world_linear_velocities[1] if len(world_linear_velocities) > 1 else [0, 0, 0]
-    
-    # Compute angular velocities in world frame from quaternions
-    world_angular_velocities = np.zeros_like(positions)
-    
-    for i in range(1, len(quaternions)):
-        dt = timestamps_sec[i] - timestamps_sec[i-1]
-        if dt > 0:
-            # Convert quaternions to rotation objects (device-to-world)
-            q_prev = R.from_quat([quaternions[i-1, 0], quaternions[i-1, 1], 
-                                 quaternions[i-1, 2], quaternions[i-1, 3]])
-            q_curr = R.from_quat([quaternions[i, 0], quaternions[i, 1], 
-                                 quaternions[i, 2], quaternions[i, 3]])
-            
-            # Compute angular velocity in world frame
-            q_diff = q_curr * q_prev.inv()
-            axis_angle = q_diff.as_rotvec()
-            world_angular_velocities[i] = axis_angle / dt
-        else:
-            world_angular_velocities[i] = world_angular_velocities[i-1] if i > 1 else [0, 0, 0]
-    
-    # Set first frame angular velocity
-    world_angular_velocities[0] = world_angular_velocities[1] if len(world_angular_velocities) > 1 else [0, 0, 0]
-    
-    # Transform velocities from world frame to device frame
+            print("  → Positions may be in mm instead of meters")
+
+    # --- Transform velocities from world frame to device frame ---
     device_linear_velocities = np.zeros_like(world_linear_velocities)
-    device_angular_velocities = np.zeros_like(world_angular_velocities)
-    
     for i in range(len(quaternions)):
-        # The quaternion represents device-to-world rotation
-        # To transform from world to device, we need the inverse
-        q_device_to_world = R.from_quat([quaternions[i, 0], quaternions[i, 1], 
-                                        quaternions[i, 2], quaternions[i, 3]])
+        q_device_to_world = R.from_quat(quaternions[i])
         q_world_to_device = q_device_to_world.inv()
-        
-        # Transform velocities to device frame
         device_linear_velocities[i] = q_world_to_device.apply(world_linear_velocities[i])
-        device_angular_velocities[i] = q_world_to_device.apply(world_angular_velocities[i])
-    
-    # return device_linear_velocities, device_angular_velocities
-    return world_linear_velocities, world_angular_velocities
+        
+    print("Finished computing device-frame velocities.")
+    return device_linear_velocities
+
 def camera_to_world_to_world_to_device(positions_c2w, quaternions_c2w):
     """
     Convert camera-to-world poses to world-to-device transforms.
@@ -206,9 +159,6 @@ def camera_to_world_to_world_to_device(positions_c2w, quaternions_c2w):
     print(f"  World-to-device trans: X[{positions_w2d[:,0].min():.3f}, {positions_w2d[:,0].max():.3f}]")
     
     return positions_w2d, quaternions_w2d
-
-
-
 
 def camera_pose_to_aria(positions_c2w, quaternions_c2w):
     """
@@ -247,6 +197,97 @@ def camera_pose_to_aria(positions_c2w, quaternions_c2w):
     
     return t_aria, quaternions_aria
 
+import numpy as np
+from scipy.spatial.transform import Rotation
+
+def transform_to_aria_device_frame(positions_c2w, quaternions_c2w, timestamps):
+   """
+   Transform camera-to-world poses to Aria device frame convention
+   
+   Input coordinate system (your world frame):
+   x -- forward, y -- left, z -- up
+   
+   Output coordinate system (Aria device frame):
+   x -- down, y -- left, z -- forward
+   
+   Args:
+       tx, ty, tz: translation arrays (camera positions in world)
+       qx, qy, qz, qw: quaternion arrays (camera orientation in world)
+       timestamps: timestamp array for velocity calculation
+   
+   Returns:
+       Dictionary with transformed poses and velocities
+   """
+   
+   # Step 1: Prepare input data
+#    positions_c2w = np.array([tx, ty, tz]).T  # Shape: (N, 3)
+#    quaternions_c2w = np.array([qx, qy, qz, qw]).T  # Shape: (N, 4)
+   
+   # Step 2: Calculate velocities in your current world frame FIRST
+   dt = np.diff(timestamps)
+   dt = np.append(dt, dt[-1])  # Extend dt array to match length
+   
+   # Calculate velocity using finite differences
+   velocity_world = np.zeros_like(positions_c2w)
+   velocity_world[1:] = np.diff(positions_c2w, axis=0) / dt[1:, np.newaxis]
+   velocity_world[0] = velocity_world[1]  # Use second point for first
+   
+   # Step 3: Define transformation matrix (Your world → Aria device)
+   R_aria_your = np.array([[0,  0, -1],  # Aria x-down = -your z-up
+                           [0,  1,  0],  # Aria y-left = your y-left
+                           [1,  0,  0]]) # Aria z-forward = your x-forward
+   
+   # Step 4: Transform positions (world coordinates with Aria axis convention)
+   positions_aria_world = positions_c2w @ R_aria_your.T
+   
+   # Step 5: Transform rotations
+   # Convert quaternions to rotation matrices
+   rotations_c2w = Rotation.from_quat(quaternions_c2w)
+   R_world_camera = rotations_c2w.as_matrix()
+   
+   # Apply coordinate system transformation to rotations
+   R_world_aria_device = R_world_camera @ R_aria_your.T
+   
+   # Convert back to quaternions
+   rotations_aria = Rotation.from_matrix(R_world_aria_device)
+   quaternions_aria = rotations_aria.as_quat()  # [qx, qy, qz, qw]
+   
+   # Step 6: Transform velocities to device frame
+   velocity_device = velocity_world @ R_aria_your.T
+   
+   # Step 7: Return results
+   return {
+       # Device-to-world poses (Aria format)
+       'tx_world_device': positions_aria_world[:, 0],
+       'ty_world_device': positions_aria_world[:, 1], 
+       'tz_world_device': positions_aria_world[:, 2],
+       'qx_world_device': quaternions_aria[:, 0],
+       'qy_world_device': quaternions_aria[:, 1],
+       'qz_world_device': quaternions_aria[:, 2],
+       'qw_world_device': quaternions_aria[:, 3],
+       
+       # Device velocities in device frame (Aria format)
+       'device_linear_velocity_x_device': velocity_device[:, 0],
+       'device_linear_velocity_y_device': velocity_device[:, 1],
+       'device_linear_velocity_z_device': velocity_device[:, 2]
+   }
+
+def transform_angular_velocity_iphone_to_aria(omega_iphone):
+    """
+    Transform angular velocities from iPhone IMU frame to Aria device frame.
+
+    Args:
+        omega_iphone: (N,3) numpy array of angular velocities in iPhone IMU frame
+
+    Returns:
+        omega_aria: (N,3) numpy array of angular velocities in Aria device frame
+    """
+    R_iphone_to_aria = np.array([
+        [ 0, -1,  0],  # X_down
+        [-1,  0,  0],  # Y_left
+        [ 0,  0, -1]   # Z_forward
+    ])
+    return omega_iphone @ R_iphone_to_aria.T
 
 
 def create_closed_loop_trajectory(frames_df, egomotion_df, aligned_imu_df):
@@ -265,7 +306,7 @@ def create_closed_loop_trajectory(frames_df, egomotion_df, aligned_imu_df):
     # Extract camera-to-world position and orientation
     positions_c2w = merged_df[['X_world', 'Y_world', 'Z_world']].values
     quaternions_c2w = merged_df[['quat_X', 'quat_Y', 'quat_Z', 'quat_W']].values
-    angular_velocities = merged_df[['omega_x', 'omega_y', 'omega_z']].values
+    device_angular_velocities = aligned_imu_df[['omega_x', 'omega_y', 'omega_z']].values
     
     timestamps = merged_df['unix_timestamp'].values
 
@@ -275,9 +316,11 @@ def create_closed_loop_trajectory(frames_df, egomotion_df, aligned_imu_df):
     print(f"                  Z[{positions_c2w[:,2].min():.3f}, {positions_c2w[:,2].max():.3f}]")
 
     # Compute velocities from the camera-to-world poses (before inversion)
-    device_linear_vel, device_angular_vel = compute_velocities_from_world_poses(
-        positions_c2w, quaternions_c2w, timestamps)
-
+    # device_linear_vel= compute_linear_velocity_device_frame(positions_c2w, quaternions_c2w, timestamps)
+    
+    # Usage example:
+    # Assuming you have your data arrays: tx, ty, tz, qx, qy, qz, qw, timestamps
+    
     # Convert camera-to-world to world-to-device for EgoAllo
     # positions_w2d, quaternions_w2d = camera_to_world_to_world_to_device(positions_c2w, quaternions_c2w)
     # positions_aria, quaternions_aria = camera_pose_to_aria(positions_c2w, quaternions_c2w)
@@ -289,31 +332,50 @@ def create_closed_loop_trajectory(frames_df, egomotion_df, aligned_imu_df):
     output_df['tracking_timestamp_us'] = merged_df['unix_timestamp']
     output_df['utc_timestamp_ns'] = merged_df['unix_timestamp'] * 1000
 
-    # ✅ CORRECT: Use world-to-device transforms (what EgoAllo expects)
-    output_df['tx_world_device'] = positions_c2w[:, 0]
-    output_df['ty_world_device'] = positions_c2w[:, 1]
-    output_df['tz_world_device'] = positions_c2w[:, 2]
-    output_df['qx_world_device'] = quaternions_c2w[:, 0]
-    output_df['qy_world_device'] = quaternions_c2w[:, 1]
-    output_df['qz_world_device'] = quaternions_c2w[:, 2]
-    output_df['qw_world_device'] = quaternions_c2w[:, 3]
+    #### Values extracted from the egomotion files -- Camera (Device) to World coordinate system
+    
+    result = transform_to_aria_device_frame(positions_c2w,  quaternions_c2w, timestamps)
 
-    # Device frame velocities (computed from original poses)
-    output_df['device_linear_velocity_x_device'] = angular_velocities[:, 0]
-    output_df['device_linear_velocity_y_device'] = angular_velocities[:, 1]
-    output_df['device_linear_velocity_z_device'] = angular_velocities[:, 2]
+    # Add to your dataframe
+    for key, value in result.items():
+        output_df[key] = value
+
+    # output_df['tx_world_device'] = positions_c2w[:, 0]
+    # output_df['ty_world_device'] = positions_c2w[:, 1]
+    # output_df['tz_world_device'] = positions_c2w[:, 2]
+    # output_df['qx_world_device'] = quaternions_c2w[:, 0]
+    # output_df['qy_world_device'] = quaternions_c2w[:, 1]
+    # output_df['qz_world_device'] = quaternions_c2w[:, 2]
+    # output_df['qw_world_device'] = quaternions_c2w[:, 3]
+
+    # Device frame velocities (computed from the poses in world coordinate system with inverse transformations.
+    # output_df['device_linear_velocity_x_device'] = device_linear_vel[:, 0]
+    # output_df['device_linear_velocity_y_device'] = device_linear_vel[:, 1]
+    # output_df['device_linear_velocity_z_device'] = device_linear_vel[:, 2]
 
     # Angular velocities
-    if len(aligned_imu_df) == len(merged_df):
-        print("Using IMU angular velocities")
-        output_df['gravity_y_world'] = aligned_imu_df['gravity_x']
-        output_df['gravity_y_world'] = aligned_imu_df['gravity_y']
-        output_df['gravity_z_world'] = aligned_imu_df['gravity_z']
-    else:
-        print("Using computed angular velocities from poses")
-        output_df['angular_velocity_x_device'] = device_angular_vel[:, 0]
-        output_df['angular_velocity_y_device'] = device_angular_vel[:, 1]
-        output_df['angular_velocity_z_device'] = device_angular_vel[:, 2]
+    # if len(aligned_imu_df) == len(merged_df):
+    # print("Using IMU angular velocities")
+    output_df['gravity_y_world'] = aligned_imu_df['gravity_x']
+    output_df['gravity_y_world'] = aligned_imu_df['gravity_y']
+    output_df['gravity_z_world'] = aligned_imu_df['gravity_z']
+    
+    ### World coordinate system gravity as mentioned in the Aria Documentation on loop trajectories.
+    # output_df['gravity_y_world'] = 0
+    # output_df['gravity_y_world'] = 0
+    # output_df['gravity_z_world'] = -9.81
+    
+    # else:
+    #### Angular velocities directly extracted from IMU data. -- These need to be transformed to the camera coordinate system.
+    output_df['angular_velocity_x_device'] = device_angular_velocities[:, 0]
+    output_df['angular_velocity_y_device'] = device_angular_velocities[:, 1]
+    output_df['angular_velocity_z_device'] = device_angular_velocities[:, 2]
+    
+    
+    output_df['angular_velocity_x_device'], output_df['angular_velocity_y_device'], \
+    output_df['angular_velocity_z_device'] = transform_angular_velocity_iphone_to_aria(output_df[['angular_velocity_x_device', 
+                                                                                                  'angular_velocity_y_device', 
+                                                                                                  'angular_velocity_z_device']].values).T
 
     # Gravity in world frame
     # output_df['gravity_x_world'] = 0.0

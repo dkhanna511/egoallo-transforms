@@ -14,6 +14,16 @@ import viser
 import yaml
 import cv2
 
+import numpy as np
+import pandas as pd
+from pathlib import Path
+from typing import Tuple, Optional
+import numpy as np
+from sklearn.linear_model import RANSACRegressor
+from sklearn.datasets import make_regression
+from sklearn.linear_model import LinearRegression
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 from egoallo import fncsmpl, fncsmpl_extensions
 from egoallo.data.aria_mps import load_point_cloud_and_find_ground
 from egoallo.guidance_optimizer_jax import GuidanceMode
@@ -94,14 +104,7 @@ class MP4ColmapInputTransforms:
     @classmethod
     def load(cls, traj_paths: MP4ColmapTrajectoryPaths, fps: int = 30, 
              device: torch.device = torch.device("cpu")) -> "MP4ColmapInputTransforms":
-        """
-        Load transforms from CSV data and convert to CPF coordinate system.
-        
-        CSV contains world-to-device transforms in your camera coordinate system.
-        We need to:
-        1. Invert world-to-device to get device-to-world (camera poses in world)
-        2. Transform from your coordinate system to CPF coordinate system
-        """
+   
         
         # Load SLAM poses
         df = pd.read_csv(traj_paths.slam_csv_path)
@@ -145,76 +148,79 @@ class MP4ColmapInputTransforms:
         T_device_to_world = []
         R_device_to_world = []
         
+        T_cpf_to_world = []
+        R_cpf_to_world = []
+        
+        Transformation_device_to_cpf = np.array([[ 0,  1,  0],  # CPF x-left = Device y-left
+                                              [-1,  0,  0],  # CPF y-up = -Device x-down
+                                              [ 0,  0,  1]])
+        
+        
         for i in range(len(translations_device_to_world)):
             # Get world-to-device transform
             qx, qy, qz, qw = quaternions_device_to_world[i]
             r_device_to_world = cls._quaternion_to_rotation_matrix(qx, qy, qz, qw)
             t_device_to_world = translations_device_to_world[i]
             
-            # Invert to get device-to-world transform
-            # For SE(3): [R t; 0 1]^(-1) = [R^T -R^T*t; 0 1]
-            # R_device_to_world = R_world_to_device.T
-            # t_device_to_world = -R_device_to_world @ t_world_to_device
+            
+            r_cpf_to_world = r_device_to_world @ Transformation_device_to_cpf.T  
+            t_cpf_to_world = t_device_to_world ## For physical transformation in location
             
             T_device_to_world.append(t_device_to_world)
             R_device_to_world.append(r_device_to_world)
+
+            T_cpf_to_world.append(t_cpf_to_world)
+            R_cpf_to_world.append(r_cpf_to_world)
+
         
-        T_device_to_world = np.array(T_device_to_world)
-        R_device_to_world = np.array(R_device_to_world)
+        T_device_to_world = np.array(T_device_to_world) ## These are 1 x 3 vectors for translation
+        R_device_to_world = np.array(R_device_to_world) ## These are 3 x 3 Rotation matrices derived from the quaternions
         
-        print(f"Device-to-world translation ranges (camera positions in world):")
-        print(f"  X(forward): [{T_device_to_world[:,0].min():.3f}, {T_device_to_world[:,0].max():.3f}]")
-        print(f"  Y(left): [{T_device_to_world[:,1].min():.3f}, {T_device_to_world[:,1].max():.3f}]")
-        print(f"  Z(up): [{T_device_to_world[:,2].min():.3f}, {T_device_to_world[:,2].max():.3f}]")
+        T_cpf_to_world = np.array(T_cpf_to_world) ## These are 1 x 3 vectors for translation
+        R_cpf_to_world = np.array(R_cpf_to_world) ## These are 3 x 3 Rotation matrices derived from the quaternions
+        
+        # print(R_device_to_world.shape)
+        # exit(0)
+        # print(f"Device-to-world translation ranges (camera positions in world):")
+        # print(f"  X(forward): [{T_device_to_world[:,0].min():.3f}, {T_device_to_world[:,0].max():.3f}]")
+        # print(f"  Y(left): [{T_device_to_world[:,1].min():.3f}, {T_device_to_world[:,1].max():.3f}]")
+        # print(f"  Z(up): [{T_device_to_world[:,2].min():.3f}, {T_device_to_world[:,2].max():.3f}]")
         
         # Step 2: Transform from your coordinate system to CPF coordinate system
         # Your system: X(forward), Y(left), Z(up) → CPF: X(left), Y(up), Z(forward)
-        translations_cpf = np.stack([
-            T_device_to_world[:, 0],  # CPF X(left) = Your Y(left)
-            T_device_to_world[:, 1],  # CPF Y(up) = Your Z(up)  
-            T_device_to_world[:, 2]   # CPF Z(forward) = Your X(forward)
-        ], axis=1)
         
         # Transform rotations with the same coordinate transformation
-        rotations_cpf = []
-        for i in range(len(R_device_to_world)):
-            R_your_system = R_device_to_world[i]
+        
+        # translations_world_device = [] 
+        # rotations_device_world = []
+        # for i in range(len(R_device_to_world)):
+        #     r_world_device = R_device_to_world[i]
+        #     t_world_device = T_device_to_world[i]
             
-            # Coordinate transformation matrix: Your system → CPF
-            # [X,Y,Z] → [Y,Z,X] (permute axes)
-            T_your_to_cpf = np.array([
-                [0, 1, 0],  # CPF X(left) = Your Y(left)
-                [0, 0, 1],  # CPF Y(up) = Your Z(up)
-                [1, 0, 0]   # CPF Z(forward) = Your X(forward)
-            ])
-            # 
-            # Transform rotation: R_cpf = T * R_your * T^T
-            
-            # R_cpf = T_your_to_cpf @ R_your_system @ T_your_to_cpf.T
-            # rotations_cpf.append(R_cpf)
-
-
-            R_cpf = R_your_system.copy()
-            rotations_cpf.append(R_cpf)
+        #     rotations_device_world.append(r_world_device)
+        #     rotations_device_world.append(t_world_device)
 
         
-        rotations_cpf = np.array(rotations_cpf)
+        # rotations_device_world = np.array(rotations_device_world)
 
-        print(f"=== FINAL CPF COORDINATE SYSTEM ===")
-        print(f"Output coordinate system: X(left), Y(up), Z(forward)")
-        print(f"CPF translation ranges:")
-        print(f"  X(left): [{translations_cpf[:,0].min():.3f}, {translations_cpf[:,0].max():.3f}]")
-        print(f"  Y(up): [{translations_cpf[:,1].min():.3f}, {translations_cpf[:,1].max():.3f}]")
-        print(f"  Z(forward): [{translations_cpf[:,2].min():.3f}, {translations_cpf[:,2].max():.3f}]")
+        # print(f"=== FINAL CPF COORDINATE SYSTEM ===")
+        # print(f"Output coordinate system: X(left), Y(up), Z(forward)")
+        # print(f"CPF translation ranges:")
+        # print(f"  X(left): [{translations_cpf[:,0].min():.3f}, {translations_cpf[:,0].max():.3f}]")
+        # print(f"  Y(up): [{translations_cpf[:,1].min():.3f}, {translations_cpf[:,1].max():.3f}]")
+        # print(f"  Z(forward): [{translations_cpf[:,2].min():.3f}, {translations_cpf[:,2].max():.3f}]")
         
         # Create SE3 transforms in CPF coordinate system
         Ts_world_device = SE3.from_rotation_and_translation(
-            rotation=SO3.from_matrix(torch.from_numpy(rotations_cpf).float()),
-            translation=torch.from_numpy(translations_cpf).float()
+            rotation=SO3.from_matrix(torch.from_numpy(R_device_to_world).float()),
+            translation=torch.from_numpy(T_device_to_world).float()
         ).parameters()
         
         # Assume CPF is same as device (common approximation for regular cameras)
-        Ts_world_cpf = Ts_world_device.clone()
+        Ts_world_cpf = SE3.from_rotation_and_translation(
+            rotation=SO3.from_matrix(torch.from_numpy(R_cpf_to_world).float()),
+            translation=torch.from_numpy(T_cpf_to_world).float()
+        ).parameters()
         
         pose_timesteps = torch.from_numpy(timestamps_sec).float()
         
@@ -246,16 +252,341 @@ class MP4ColmapInputTransforms:
             self.pose_timesteps.to(device),
             device
         )
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from sklearn.linear_model import LinearRegression, RANSACRegressor
+from pathlib import Path
+from typing import Tuple, Optional
+from scipy.spatial import ConvexHull
+from sklearn.decomposition import PCA
 
-def load_semidense_points_and_find_ground(points_csv_path: Path) -> Tuple[np.ndarray, float]:
+def fit_plane_ransac(points: np.ndarray, max_trials: int = 1000, residual_threshold: float = 0.01) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Load point cloud from semidense_points.csv.gz and estimate ground plane.
+    Fit a plane to 3D points using RANSAC.
     
-    Uses the points as they are in the CSV without coordinate system assumptions.
-    The CSV contains points in the MPS coordinate system:
-    - px_world, py_world, pz_world: 3D coordinates in world frame
+    Returns:
+        plane_normal: Normal vector of the plane (a, b, c) where ax + by + cz + d = 0
+        plane_point: A point on the plane
+    """
+    if len(points) < 3:
+        raise ValueError("Need at least 3 points to fit a plane")
     
-    Ground plane estimation assumes the ground is the lowest major plane.
+    # RANSAC for plane fitting
+    # We'll fit z = ax + by + c, then convert to normal form
+    X = points[:, :2]  # x, y coordinates
+    y = points[:, 2]   # z coordinates
+    
+    ransac = RANSACRegressor(
+        LinearRegression(),
+        max_trials=max_trials,
+        residual_threshold=residual_threshold,
+        random_state=42
+    )
+    
+    ransac.fit(X, y)
+    
+    # Get plane parameters: z = ax + by + c
+    # Convert to normal form: ax + by - z + c = 0
+    a, b = ransac.estimator_.coef_
+    c = ransac.estimator_.intercept_
+    
+    plane_normal = np.array([a, b, -1])
+    plane_normal = plane_normal / np.linalg.norm(plane_normal)  # Normalize
+    
+    # Get a point on the plane
+    plane_point = np.array([0, 0, c])
+    
+    return plane_normal, plane_point, ransac.inlier_mask_
+
+def calculate_plane_area(points: np.ndarray, plane_normal: np.ndarray) -> float:
+    """
+    Calculate the area of a plane based on the convex hull of projected points.
+    """
+    if len(points) < 3:
+        return 0.0
+    
+    try:
+        # Project points onto the plane using PCA
+        pca = PCA(n_components=2)
+        # Center the points
+        centered_points = points - np.mean(points, axis=0)
+        
+        # Create a coordinate system on the plane
+        # Use the two principal components as the plane basis
+        points_2d = pca.fit_transform(centered_points)
+        
+        # Calculate area using convex hull
+        if len(points_2d) >= 3:
+            hull = ConvexHull(points_2d)
+            return hull.volume  # In 2D, volume is actually area
+        else:
+            return 0.0
+    except:
+        # Fallback: approximate area as bounding box
+        x_range = np.ptp(points[:, 0])  # peak-to-peak
+        y_range = np.ptp(points[:, 1])
+        return x_range * y_range
+
+def get_plane_bounds(points: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Get the bounding box of plane points."""
+    min_coords = np.min(points, axis=0)
+    max_coords = np.max(points, axis=0)
+    return min_coords, max_coords
+
+def create_plane_rectangle(plane_points: np.ndarray, plane_normal: np.ndarray, 
+                         margin: float = 0.1) -> np.ndarray:
+    """
+    Create a rectangle mesh on the detected plane for visualization.
+    
+    Args:
+        plane_points: Points belonging to the plane
+        plane_normal: Normal vector of the plane
+        margin: Extra margin around the points (as fraction of range)
+    
+    Returns:
+        rectangle_corners: 4 corners of the rectangle on the plane
+    """
+    # Get bounds of the plane points
+    min_coords, max_coords = get_plane_bounds(plane_points)
+    
+    # Add margin
+    range_x = max_coords[0] - min_coords[0]
+    range_y = max_coords[1] - min_coords[1]
+    
+    margin_x = range_x * margin
+    margin_y = range_y * margin
+    
+    # Create rectangle corners
+    x_min, x_max = min_coords[0] - margin_x, max_coords[0] + margin_x
+    y_min, y_max = min_coords[1] - margin_y, max_coords[1] + margin_y
+    
+    # Calculate Z values for each corner using the plane equation
+    # plane_normal · (point - plane_point) = 0
+    # Solve for z: z = (plane_normal[0]*(plane_point[0] - x) + 
+    #                   plane_normal[1]*(plane_point[1] - y) + 
+    #                   plane_normal[2]*plane_point[2]) / plane_normal[2]
+    
+    plane_point = np.mean(plane_points, axis=0)  # Use centroid as reference point
+    
+    def get_z_on_plane(x, y):
+        if abs(plane_normal[2]) < 1e-6:  # Nearly vertical plane
+            return plane_point[2]
+        return (np.dot(plane_normal, plane_point) - plane_normal[0]*x - plane_normal[1]*y) / plane_normal[2]
+    
+    corners = np.array([
+        [x_min, y_min, get_z_on_plane(x_min, y_min)],
+        [x_max, y_min, get_z_on_plane(x_max, y_min)],
+        [x_max, y_max, get_z_on_plane(x_max, y_max)],
+        [x_min, y_max, get_z_on_plane(x_min, y_max)]
+    ])
+    
+    return corners
+
+def detect_multiple_planes(points: np.ndarray, max_planes: int = 3, min_points_per_plane: int = 100) -> list:
+    """
+    Detect multiple planes in the point cloud using iterative RANSAC.
+    
+    Returns list of (plane_normal, plane_point, inlier_points, inlier_mask)
+    """
+    planes = []
+    remaining_points = points.copy()
+    remaining_indices = np.arange(len(points))
+    
+    for i in range(max_planes):
+        if len(remaining_points) < min_points_per_plane:
+            break
+            
+        try:
+            # Fit plane to remaining points
+            plane_normal, plane_point, inlier_mask = fit_plane_ransac(
+                remaining_points, 
+                residual_threshold=2  # 2cm threshold
+            )
+            
+            inlier_points = remaining_points[inlier_mask]
+            
+            if len(inlier_points) < min_points_per_plane:
+                break
+            
+            # Calculate plane area
+            plane_area = calculate_plane_area(inlier_points, plane_normal)
+            
+            # Store plane info with original indices
+            original_inlier_indices = remaining_indices[inlier_mask]
+            planes.append({
+                'normal': plane_normal,
+                'point': plane_point,
+                'inlier_points': inlier_points,
+                'original_indices': original_inlier_indices,
+                'num_points': len(inlier_points),
+                'area': plane_area
+            })
+            
+            print(f"Plane {i+1}: {len(inlier_points)} points, area: {plane_area:.2f}, normal: {plane_normal}")
+            
+            # Remove inlier points for next iteration
+            remaining_points = remaining_points[~inlier_mask]
+            remaining_indices = remaining_indices[~inlier_mask]
+            
+        except Exception as e:
+            print(f"Could not fit plane {i+1}: {e}")
+            break
+    
+    return planes
+
+def identify_ground_plane(planes: list, points: np.ndarray) -> Tuple[Optional[dict], float]:
+    """
+    Identify which plane is most likely the ground based on:
+    1. Most horizontal plane (normal vector close to vertical)
+    2. LARGEST AREA (not point density)
+    3. Reasonable height (not too high)
+    """
+    if not planes:
+        return None, 0.0
+    
+    ground_candidates = []
+    
+    for i, plane in enumerate(planes):
+        normal = plane['normal']
+        plane_point = plane['point']
+        
+        # Measure how horizontal the plane is
+        # A horizontal plane should have normal close to [0, 0, ±1]
+        verticality = abs(normal[2])  # How close to vertical the normal is
+        
+        # Calculate average height of plane points
+        plane_heights = plane['inlier_points'][:, 2]  # Z is up
+        avg_height = np.mean(plane_heights)
+        
+        # Get plane area (this is the key change!)
+        plane_area = plane['area']
+        
+        ground_candidates.append({
+            'plane_idx': i,
+            'plane': plane,
+            'verticality': verticality,
+            'avg_height': avg_height,
+            'area': plane_area,
+            'num_points': plane['num_points']
+        })
+        
+        print(f"Plane {i+1} analysis:")
+        print(f"  Verticality (normal Z component): {verticality:.3f}")
+        print(f"  Average height: {avg_height:.3f}")
+        print(f"  Area: {plane_area:.3f}")
+        print(f"  Number of points: {plane['num_points']}")
+    
+    # NEW SCORING: Prioritize AREA over point count
+    def ground_score(candidate):
+        # Higher score = more likely to be ground
+        verticality_score = candidate['verticality'] * 10  # Weight horizontality heavily
+        area_score = candidate['area'] / 100.0  # Area is the key factor now!
+        height_penalty = max(0, candidate['avg_height']) * -0.5  # Penalize high planes
+        
+        # Don't use point count in scoring to avoid dense table bias
+        total_score = verticality_score + area_score + height_penalty
+        
+        print(f"  Ground score: {total_score:.3f} (vert: {verticality_score:.3f}, "
+              f"area: {area_score:.3f}, height_penalty: {height_penalty:.3f})")
+        
+        return total_score
+    
+    ground_candidates.sort(key=ground_score, reverse=True)
+    
+    best_candidate = ground_candidates[0]
+    ground_plane = best_candidate['plane']
+    
+    # Calculate ground level as the average Z coordinate of ground plane points
+    ground_level = np.mean(ground_plane['inlier_points'][:, 2])
+    
+    print(f"\nSelected ground plane: Plane {best_candidate['plane_idx'] + 1}")
+    print(f"Ground level (Z): {ground_level:.3f}")
+    print(f"Ground plane area: {ground_plane['area']:.2f}")
+    
+    return ground_plane, ground_level
+
+def visualize_planes(points: np.ndarray, planes: list, ground_plane: Optional[dict] = None):
+    """Visualize the point cloud and detected planes with rectangle overlay on ground."""
+    fig = plt.figure(figsize=(15, 10))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    # Plot all points in gray
+    ax.scatter(points[:, 0], points[:, 1], points[:, 2], 
+              c='gray', alpha=0.2, s=1, label='All points')
+    
+    # Plot each plane with different colors
+    colors = ['red', 'blue', 'green', 'orange', 'purple']
+    
+    for i, plane in enumerate(planes):
+        color = colors[i % len(colors)]
+        inlier_points = plane['inlier_points']
+        
+        label = f"Plane {i+1} (area: {plane['area']:.1f})"
+        if ground_plane and plane is ground_plane:
+            label += " - GROUND"
+            
+        ax.scatter(inlier_points[:, 0], inlier_points[:, 1], inlier_points[:, 2],
+                  c=color, alpha=0.8, s=3, label=label)
+    
+    # Draw rectangle on ground plane
+    if ground_plane is not None:
+        try:
+            rectangle_corners = create_plane_rectangle(
+                ground_plane['inlier_points'], 
+                ground_plane['normal'],
+                margin=0.05
+            )
+            
+            # Create rectangle by connecting corners
+            rect_x = [rectangle_corners[0, 0], rectangle_corners[1, 0], 
+                     rectangle_corners[2, 0], rectangle_corners[3, 0], rectangle_corners[0, 0]]
+            rect_y = [rectangle_corners[0, 1], rectangle_corners[1, 1], 
+                     rectangle_corners[2, 1], rectangle_corners[3, 1], rectangle_corners[0, 1]]
+            rect_z = [rectangle_corners[0, 2], rectangle_corners[1, 2], 
+                     rectangle_corners[2, 2], rectangle_corners[3, 2], rectangle_corners[0, 2]]
+            
+            ax.plot(rect_x, rect_y, rect_z, 'k-', linewidth=3, label='Ground Rectangle')
+            
+            # Fill the rectangle (optional)
+            ax.plot_trisurf(rectangle_corners[:, 0], rectangle_corners[:, 1], rectangle_corners[:, 2], 
+                           alpha=0.3, color='yellow')
+            
+        except Exception as e:
+            print(f"Could not draw ground rectangle: {e}")
+    
+    ax.set_xlabel('X (px_world)')
+    ax.set_ylabel('Y (py_world)')  
+    ax.set_zlabel('Z (pz_world)')
+    ax.legend()
+    ax.set_title('Point Cloud with Detected Planes (Area-Based Ground Detection)')
+    
+    # Set equal aspect ratio
+    max_range = np.array([points[:,0].max()-points[:,0].min(),
+                         points[:,1].max()-points[:,1].min(),
+                         points[:,2].max()-points[:,2].min()]).max() / 2.0
+    mid_x = (points[:,0].max()+points[:,0].min()) * 0.5
+    mid_y = (points[:,1].max()+points[:,1].min()) * 0.5
+    mid_z = (points[:,2].max()+points[:,2].min()) * 0.5
+    ax.set_xlim(mid_x - max_range, mid_x + max_range)
+    ax.set_ylim(mid_y - max_range, mid_y + max_range)
+    ax.set_zlim(mid_z - max_range, mid_z + max_range)
+    
+    plt.tight_layout()
+    plt.show()
+
+def load_semidense_points_and_find_ground(points_csv_path: Path, visualize: bool = False) -> Tuple[np.ndarray, float]:
+    """
+    Load point cloud from semidense_points.csv.gz and estimate ground plane using area-based detection.
+    
+    Args:
+        points_csv_path: Path to the semidense points CSV file
+        visualize: Whether to show a 3D visualization of the detected planes
+    
+    Returns:
+        points: The loaded point cloud
+        ground_level: Estimated ground level (Z coordinate)
     """
     if not points_csv_path.exists():
         print(f"Warning: Points file not found: {points_csv_path}")
@@ -270,12 +601,8 @@ def load_semidense_points_and_find_ground(points_csv_path: Path) -> Tuple[np.nda
     if missing_cols:
         raise ValueError(f"Missing required columns in point cloud CSV: {missing_cols}")
     
-    # Extract points as they are in the CSV (MPS world coordinate system)
-    points = np.stack([
-        df['px_world'].values,
-        df['py_world'].values,
-        df['pz_world'].values
-    ], axis=1)
+    # Extract points
+    points = np.stack([df['px_world'].values, df['py_world'].values, df['pz_world'].values], axis=1)
     
     print(f"Loaded {len(points)} points")
     print(f"Point cloud ranges:")
@@ -283,64 +610,48 @@ def load_semidense_points_and_find_ground(points_csv_path: Path) -> Tuple[np.nda
     print(f"  py_world: [{points[:,1].min():.3f}, {points[:,1].max():.3f}]")
     print(f"  pz_world: [{points[:,2].min():.3f}, {points[:,2].max():.3f}]")
     
-    # Based on observation: camera looking down at table, ground is further forward (higher Z)
-    # and sparser than the dense table points
+    # Detect multiple planes in the point cloud
+    print("\nDetecting planes...")
+    planes = detect_multiple_planes(points, max_planes=5, min_points_per_plane=200)
     
-    # Analyze point distribution in forward direction (assuming pz_world = forward/depth)
-    z_values = points[:, 2]  # pz_world
-    z_sorted = np.sort(z_values)
+    if not planes:
+        print("No planes detected! Using fallback method.")
+        # Fallback: assume ground is at the 10th percentile of the lowest coordinate
+        coord_ranges = [
+            (points[:, 0].max() - points[:, 0].min(), 0),  # X range
+            (points[:, 1].max() - points[:, 1].min(), 1),  # Y range  
+            (points[:, 2].max() - points[:, 2].min(), 2)   # Z range
+        ]
+        # The axis with largest range is likely horizontal, smallest might be vertical
+        coord_ranges.sort(reverse=True)
+        vertical_axis = coord_ranges[-1][1]  # Axis with smallest range
+        ground_level = np.percentile(points[:, vertical_axis], 10)
+        return points, ground_level
     
-    print(f"Forward direction (pz_world) analysis:")
-    print(f"  Min Z: {z_sorted[0]:.3f}")
-    print(f"  Max Z: {z_sorted[-1]:.3f}")
+    # Identify which plane is the ground
+    print("\nIdentifying ground plane...")
+    ground_plane, ground_level = identify_ground_plane(planes, points)
     
-    # Create depth bins to analyze point density
-    n_bins = 20
-    hist, bin_edges = np.histogram(z_values, bins=n_bins)
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    if ground_plane is None:
+        print("Could not identify ground plane!")
+        ground_level = np.percentile(points[:, 2], 10)  # Fallback
     
-    print(f"Point density analysis across depth bins:")
-    for i, (center, count) in enumerate(zip(bin_centers, hist)):
-        print(f"  Bin {i:2d}: Z={center:6.3f}, Points={count:4d}")
-    
-    # Ground is likely in the forward region with lower point density
-    # Look for the furthest region that still has reasonable number of points
-    min_points_threshold = max(10, len(points) * 0.01)  # At least 1% of points or 10 points
-    
-    # Find bins with sufficient points, starting from the furthest
-    valid_bins = [(i, center, count) for i, (center, count) in enumerate(zip(bin_centers, hist)) 
-                  if count >= min_points_threshold]
-    
-    if valid_bins:
-        # Take the furthest valid bin as potential ground region
-        furthest_bin_idx, furthest_center, furthest_count = valid_bins[-1]
-        
-        # Ground level is somewhere in this furthest region
-        # Use points in this bin to estimate the ground plane
-        bin_start = bin_edges[furthest_bin_idx]
-        bin_end = bin_edges[furthest_bin_idx + 1]
-        
-        ground_region_mask = (z_values >= bin_start) & (z_values <= bin_end)
-        ground_region_points = points[ground_region_mask]
-        
-        if len(ground_region_points) > 0:
-            # The "ground level" in the context of the vertical axis
-            # We need to find which axis represents vertical (up/down)
-            # Look at Y-axis as it's most likely to be vertical
-            y_values_in_ground_region = ground_region_points[:, 1]  # py_world
-            ground_level = np.percentile(y_values_in_ground_region, 10)  # Bottom 10% in Y
-            
-            print(f"Ground region found at Z=[{bin_start:.3f}, {bin_end:.3f}] with {len(ground_region_points)} points")
-            print(f"Ground level (py_world): {ground_level:.3f}")
-        else:
-            ground_level = np.percentile(points[:, 1], 10)  # Fallback
-            print(f"Using fallback ground level: {ground_level:.3f}")
-    else:
-        ground_level = np.percentile(points[:, 1], 10)  # Fallback
-        print(f"No valid ground region found, using fallback: {ground_level:.3f}")
-    
+    # Visualization
+    # if visualize:
+    # visualize_planes(points, planes, ground_plane)
+    # exit(0)
     return points, ground_level
 
+# Additional utility functions for filtering points based on ground level
+def filter_points_above_ground(points: np.ndarray, ground_level: float, 
+                             height_threshold: float = 0.05) -> np.ndarray:
+    """Filter points that are above the ground by at least height_threshold."""
+    return points[points[:, 2] > ground_level + height_threshold]
+
+def filter_points_near_ground(points: np.ndarray, ground_level: float,
+                            tolerance: float = 0.02) -> np.ndarray:
+    """Filter points that are close to the ground level."""
+    return points[np.abs(points[:, 2] - ground_level) <= tolerance]
 @dataclasses.dataclass
 class Args:
     traj_root: Path
@@ -363,7 +674,7 @@ class Args:
     """Rotate the CPF poses by some X angle."""
     start_index: int = 0
     """Index within the downsampled trajectory to start inference at."""
-    traj_length: int = 128
+    traj_length: int = 256
     """How many timesteps to estimate body motion for."""
     num_samples: int = 1
     """Number of samples to take."""
