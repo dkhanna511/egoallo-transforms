@@ -42,8 +42,8 @@ def main(traj_root: Path, overwrite: bool = False) -> None:
     # Check required files exist
     if not paths.images_dir.exists():
         raise FileNotFoundError(f"Images directory not found: {paths.images_dir}")
-    if not paths.video_metadata_path.exists():
-        raise FileNotFoundError(f"Video metadata not found: {paths.video_metadata_path}")
+    # if not paths.video_metadata_path.exists():
+        # raise FileNotFoundError(f"Video metadata not found: {paths.video_metadata_path}")
     if not paths.slam_csv_path.exists():
         raise FileNotFoundError(f"SLAM trajectory not found: {paths.slam_csv_path}")
 
@@ -77,17 +77,19 @@ def run_hamer_and_save_mp4(
     hamer_helper = HamerHelper()
 
     # Load video metadata
-    with open(paths.video_metadata_path, 'r') as f:
-        video_metadata = json.load(f)
+    # with open(paths.video_metadata_path, 'r') as f:
+    #     video_metadata = json.load(f)
     
-    fps = video_metadata.get('fps', 30.0)
-    frame_count = video_metadata.get('frame_count', 0)
-    
+    # fps = video_metadata.get('fps', 30.0)
+    # frame_count = video_metadata.get('frame_count', 0)
+    fps = 30.0
+    frame_count = 3031
     # Load SLAM trajectory for timestamps
-    print("Printing current paths:\n {} \n {} \n {} ".format(paths.video_metadata_path, paths.slam_csv_path, paths.images_dir))
+    # print("Printing current paths:\n {} \n {} \n {} ".format(paths.video_metadata_path, paths.slam_csv_path, paths.images_dir))
     slam_df = pd.read_csv(paths.slam_csv_path)
     slam_timestamps_us = slam_df['tracking_timestamp_us'].values
     slam_timestamps_ns = slam_timestamps_us * 1000  # Convert to nanoseconds
+    
     
     # Find all image files
     image_files = sorted(list(paths.images_dir.glob("*.jpg")) + 
@@ -99,16 +101,17 @@ def run_hamer_and_save_mp4(
     
     # For MP4/COLMAP data, we need to estimate camera parameters
     # These are approximate values - you might need to adjust based on your camera
-    focal_length = 450  # Approximate focal length in pixels
-    image_width = video_metadata.get('width', 1408)
-    image_height = video_metadata.get('height', 1408)
+    focal_length = 1305  # Approximate focal length in pixels
+    # image_width = video_metadata.get('width', 1408)
+    # image_height = video_metadata.get('height', 1408)
     
     # Since we don't have Aria device calibration, we'll use identity transforms
-    # In a real scenario, you'd want to calibrate these properly
-    T_device_cam = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])  # [qx, qy, qz, qw, tx, ty, tz]
-    T_cpf_cam = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])     # Assume CPF == device for MP4
-
+    T_device_cam = np.array([ 0, 0.70710678,  0,  -0.70710678, 0.0, 0.0, 0.0])  # [qx, qy, qz, qw, tx, ty, tz]
+    
+    # T_cpf_cam = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])     # Assume CPF == device for MP4
+    T_cpf_cam = np.array([0.5, 0.5, 0.5, -0.5, 0.0, 0.0, 0.0])    ### This is from our camera to CPF (Aria)
     # Dict from timestamp in nanoseconds to hand detections
+    
     detections_left_wrt_cam: dict[int, SingleHandHamerOutputWrtCamera | None] = {}
     detections_right_wrt_cam: dict[int, SingleHandHamerOutputWrtCamera | None] = {}
 
@@ -316,15 +319,15 @@ def estimate_camera_parameters_from_colmap(traj_root: Path) -> dict:
             cameras_file = possible_path
             break
     print(" camera file is : ", cameras_file)
-    exit(0)
+    # exit(0)
     if cameras_file is None:
         print("No COLMAP cameras.txt found, using default parameters")
         return {
-            'focal_length': 450,
-            'cx': 704,  # image_width / 2
-            'cy': 704,  # image_height / 2
-            'width': 1408,
-            'height': 1408
+            'focal_length': 1305,
+            'cx': 960,  # image_width / 2
+            'cy': 540,  # image_height / 2
+            'width': 1920,
+            'height': 1080
         }
     
     try:
@@ -360,13 +363,12 @@ def estimate_camera_parameters_from_colmap(traj_root: Path) -> dict:
     
     # Fallback to defaults
     return {
-        'focal_length': 450,
-        'cx': 704,
-        'cy': 704,
-        'width': 1408,
-        'height': 1408
-    }
-
+            'focal_length': 1305,
+            'cx': 960,  # image_width / 2
+            'cy': 540,  # image_height / 2
+            'width': 1920,
+            'height': 1080
+        }
 
 if __name__ == "__main__":
     tyro.cli(main)

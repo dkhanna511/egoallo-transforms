@@ -45,12 +45,12 @@ def main(traj_root: Path, overwrite: bool = False) -> None:
 def run_hamer_and_save(
     vrs_path: Path, pickle_out: Path, hamer_render_out: Path, overwrite: bool
 ) -> None:
-    if not overwrite:
-        assert not pickle_out.exists()
-        assert not hamer_render_out.exists()
-    else:
-        pickle_out.unlink(missing_ok=True)
-        shutil.rmtree(hamer_render_out, ignore_errors=True)
+    # if not overwrite:
+    #     assert not pickle_out.exists()
+    #     assert not hamer_render_out.exists()
+    # else:
+    #     pickle_out.unlink(missing_ok=True)
+    #     shutil.rmtree(hamer_render_out, ignore_errors=True)
 
     hamer_render_out.mkdir(exist_ok=True)
     hamer_helper = HamerHelper()
@@ -68,9 +68,11 @@ def run_hamer_and_save(
     device_calib = provider.get_device_calibration()
     assert device_calib is not None
     camera_calib = device_calib.get_camera_calib("camera-rgb")
+    print(" camera calib is : ", camera_calib)
     assert camera_calib is not None
     pinhole = calibration.get_linear_camera_calibration(1408, 1408, 450)
-
+    print(" pinhole is : ", pinhole)
+    # exit(0)
     # Compute camera extrinsics!
     sophus_T_device_camera = device_calib.get_transform_device_sensor("camera-rgb")
     sophus_T_cpf_camera = device_calib.get_transform_cpf_sensor("camera-rgb")
@@ -88,6 +90,8 @@ def run_hamer_and_save(
             sophus_T_cpf_camera.translation().squeeze(axis=0),
         ]
     )
+    
+    
     assert T_device_cam.shape == T_cpf_cam.shape == (7,)
 
     # Dict from capture timestamp in nanoseconds to fields we care about.

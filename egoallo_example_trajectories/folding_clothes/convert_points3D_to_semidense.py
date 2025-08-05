@@ -51,7 +51,7 @@ def create_plane_rectangle(plane_points: np.ndarray, plane_normal: np.ndarray,
     y_min, y_max = min_coords[1] - margin_y, max_coords[1] + margin_y
     
     # Calculate Z values for each corner using the plane equation
-    # plane_normal · (point - plane_point) = 0
+    # plane_normal � (point - plane_point) = 0
     # Solve for z: z = (plane_normal[0]*(plane_point[0] - x) + 
     #                   plane_normal[1]*(plane_point[1] - y) + 
     #                   plane_normal[2]*plane_point[2]) / plane_normal[2]
@@ -128,10 +128,6 @@ def read_colmap_points3d(points3d_path: Path) -> Tuple[np.ndarray, np.ndarray, n
     print(f"  Z(forward): [{points_3d[:, 2].min():.3f}, {points_3d[:, 2].max():.3f}]")
     
     return points_3d, colors, errors
-
-from mpl_toolkits.mplot3d import Axes3D
-
-
 
 def fit_plane_ransac(points: np.ndarray, max_trials: int = 1000, residual_threshold: float = 0.01) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -252,8 +248,6 @@ def detect_multiple_planes(points: np.ndarray, max_planes: int = 3, min_points_p
     
     return planes
 
-
-
 def identify_ground_plane(planes: list, points: np.ndarray) -> Tuple[Optional[dict], float]:
     """
     Identify which plane is most likely the ground based on:
@@ -271,7 +265,7 @@ def identify_ground_plane(planes: list, points: np.ndarray) -> Tuple[Optional[di
         plane_point = plane['point']
         
         # Measure how horizontal the plane is
-        # A horizontal plane should have normal close to [0, 0, ±1]
+        # A horizontal plane should have normal close to [0, 0, �1]
         verticality = abs(normal[2])  # How close to vertical the normal is
         
         # Calculate average height of plane points
@@ -325,7 +319,108 @@ def identify_ground_plane(planes: list, points: np.ndarray) -> Tuple[Optional[di
     
     return ground_plane, ground_level
 
-def visualize_planes(points: np.ndarray, planes: list, ground_plane: Optional[dict] = None):
+def compute_rotation_matrix_to_align_plane(plane_normal: np.ndarray, target_normal: np.ndarray = np.array([0, 0, 1])) -> np.ndarray:
+    """
+    Compute rotation matrix to align a plane normal with a target normal (default: vertical up).
+    
+    Args:
+        plane_normal: Current normal vector of the plane
+        target_normal: Target normal vector (default: [0, 0, 1] for horizontal ground)
+    
+    Returns:
+        rotation_matrix: 3x3 rotation matrix
+    """
+    # Normalize vectors
+    plane_normal = plane_normal / np.linalg.norm(plane_normal)
+    target_normal = target_normal / np.linalg.norm(target_normal)
+    
+    # If vectors are already aligned, return identity
+    if np.allclose(plane_normal, target_normal):
+        return np.eye(3)
+    
+    # If vectors are opposite, we need to handle this special case
+    if np.allclose(plane_normal, -target_normal):
+        # Find a perpendicular vector to rotate around
+        # Choose the axis with the smallest component to avoid numerical issues
+        min_idx = np.argmin(np.abs(plane_normal))
+        perpendicular = np.zeros(3)
+        perpendicular[min_idx] = 1.0
+        # Make sure it's actually perpendicular
+        perpendicular = perpendicular - np.dot(perpendicular, plane_normal) * plane_normal
+        perpendicular = perpendicular / np.linalg.norm(perpendicular)
+        # 180-degree rotation around this axis
+        return 2 * np.outer(perpendicular, perpendicular) - np.eye(3)
+    
+    # General case: use Rodrigues' rotation formula
+    # Rotation axis is cross product of the two vectors
+    rotation_axis = np.cross(plane_normal, target_normal)
+    rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
+    
+    # Rotation angle
+    cos_angle = np.dot(plane_normal, target_normal)
+    sin_angle = np.linalg.norm(np.cross(plane_normal, target_normal))
+    angle = np.arctan2(sin_angle, cos_angle)
+    
+    # Rodrigues' formula for rotation matrix
+    K = np.array([[0, -rotation_axis[2], rotation_axis[1]],
+                  [rotation_axis[2], 0, -rotation_axis[0]],
+                  [-rotation_axis[1], rotation_axis[0], 0]])
+    
+    R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * np.dot(K, K)
+    
+    return R
+
+def align_point_cloud_to_ground_plane(points: np.ndarray, ground_plane: dict, 
+                                    target_ground_normal: np.ndarray = np.array([0, 0, -1])) -> np.ndarray:
+    """
+    Rotate the entire point cloud so that the ground plane becomes horizontal.
+    
+    Args:
+        points: (N, 3) array of all points
+        ground_plane: Dictionary containing ground plane information
+        target_ground_normal: Target normal for the ground plane (default: [0, 0, 1] for horizontal)
+    
+    Returns:
+        aligned_points: (N, 3) array of rotated points
+    """
+    # Get the current ground plane normal
+    current_normal = ground_plane['normal']
+    
+    print(f"Current ground plane normal: {current_normal}")
+    print(f"Target ground plane normal: {target_ground_normal}")
+    
+    # Compute rotation matrix to align the ground plane normal with the target
+    rotation_matrix = compute_rotation_matrix_to_align_plane(current_normal, target_ground_normal)
+    
+    print(f"Rotation matrix:\n{rotation_matrix}")
+    
+    # Apply rotation to all points
+    # Subtract centroid, rotate, then add back centroid to maintain relative positions
+    centroid = np.mean(points, axis=0)
+    centered_points = points - centroid
+    rotated_centered_points = centered_points @ rotation_matrix.T
+    aligned_points = rotated_centered_points + centroid
+    
+    print(f"Applied rotation to {len(points)} points")
+    
+    # Verify the rotation worked by checking the new ground plane normal
+    if len(ground_plane['inlier_points']) > 0:
+        # Get the indices of ground plane points
+        ground_indices = ground_plane['original_indices']
+        rotated_ground_points = aligned_points[ground_indices]
+        
+        # Fit a new plane to the rotated ground points to verify
+        try:
+            new_normal, _, _ = fit_plane_ransac(rotated_ground_points, residual_threshold=0.05)
+            print(f"Verification - new ground plane normal after rotation: {new_normal}")
+            angle_error = np.arccos(np.clip(np.abs(np.dot(new_normal, target_ground_normal)), 0, 1)) * 180 / np.pi
+            print(f"Angle between new normal and target: {angle_error:.2f} degrees")
+        except Exception as e:
+            print(f"Could not verify rotation: {e}")
+    
+    return aligned_points
+
+def visualize_planes(points: np.ndarray, planes: list, ground_plane: Optional[dict] = None, title_suffix: str = ""):
     """Visualize the point cloud and detected planes with rectangle overlay on ground."""
     fig = plt.figure(figsize=(15, 10))
     ax = fig.add_subplot(111, projection='3d')
@@ -339,7 +434,12 @@ def visualize_planes(points: np.ndarray, planes: list, ground_plane: Optional[di
     
     for i, plane in enumerate(planes):
         color = colors[i % len(colors)]
-        inlier_points = plane['inlier_points']
+        
+        # For aligned point cloud, we need to extract the plane points using original indices
+        if 'original_indices' in plane:
+            inlier_points = points[plane['original_indices']]
+        else:
+            inlier_points = plane['inlier_points']
         
         label = f"Plane {i+1} (area: {plane['area']:.1f})"
         if ground_plane and plane is ground_plane:
@@ -351,9 +451,24 @@ def visualize_planes(points: np.ndarray, planes: list, ground_plane: Optional[di
     # Draw rectangle on ground plane
     if ground_plane is not None:
         try:
+            # For aligned point cloud, extract ground points using original indices
+            if 'original_indices' in ground_plane:
+                ground_points = points[ground_plane['original_indices']]
+            else:
+                ground_points = ground_plane['inlier_points']
+                
+            # Recompute plane normal for the current points orientation
+            if len(ground_points) >= 3:
+                try:
+                    current_normal, _, _ = fit_plane_ransac(ground_points, residual_threshold=0.05)
+                except:
+                    current_normal = ground_plane['normal']  # Fallback to original
+            else:
+                current_normal = ground_plane['normal']
+            
             rectangle_corners = create_plane_rectangle(
-                ground_plane['inlier_points'], 
-                ground_plane['normal'],
+                ground_points, 
+                current_normal,
                 margin=0.05
             )
             
@@ -378,7 +493,8 @@ def visualize_planes(points: np.ndarray, planes: list, ground_plane: Optional[di
     ax.set_ylabel('Y (py_world)')  
     ax.set_zlabel('Z (pz_world)')
     ax.legend()
-    ax.set_title('Point Cloud with Detected Planes (Area-Based Ground Detection)')
+    title = f'Point Cloud with Detected Planes (Area-Based Ground Detection){title_suffix}'
+    ax.set_title(title)
     
     # Set equal aspect ratio
     max_range = np.array([points[:,0].max()-points[:,0].min(),
@@ -394,7 +510,6 @@ def visualize_planes(points: np.ndarray, planes: list, ground_plane: Optional[di
     plt.tight_layout()
     plt.show()
 
-    
 def visualize_pointcloud(points: np.ndarray, title="Point Cloud (Aria World)"):
     """
     Visualize a 3D point cloud with matplotlib.
@@ -424,10 +539,10 @@ def visualize_pointcloud(points: np.ndarray, title="Point Cloud (Aria World)"):
     
     plt.show()
 
-
 def transform_colmap_to_aria_world(points_colmap: np.ndarray) -> np.ndarray:
     """
-    Transform COLMAP point cloud to Aria world coordinate system.
+    Transform COLMAP point cloud to Aria world coordinate system, 
+    detect ground plane, and align it to be horizontal.
     
     COLMAP world: X(right), Y(down), Z(forward)
     Aria world: X(down), Y(left), Z(forward)
@@ -436,63 +551,63 @@ def transform_colmap_to_aria_world(points_colmap: np.ndarray) -> np.ndarray:
         points_colmap: (N, 3) points in COLMAP world coordinates
     
     Returns:
-        points_aria: (N, 3) points in Aria world coordinates
+        points_aria_aligned: (N, 3) points in Aria world coordinates with ground plane aligned
     """
-    print("Transforming coordinate system: COLMAP world → Aria world")
+    print("Transforming coordinate system: COLMAP world � Aria world")
     print("  COLMAP: X(right), Y(down), Z(forward)")
     print("  Aria:   X(down), Y(left), Z(forward)")
     
-    # Transformation matrix: COLMAP world → Aria world
+    # Transformation matrix: COLMAP world � Aria world
     # Aria x-down = +COLMAP y-down
     # Aria y-left = -COLMAP x-right  
     # Aria z-forward = +COLMAP z-forward
     R_aria_colmap = np.array([[0,  1,  0],  # Aria x-down = +COLMAP y-down
-                              [1, 0,  0],  # Aria y-left = -COLMAP x-right  
+                              [-1, 0,  0],  # Aria y-left = -COLMAP x-right  
                               [0,  0,  -1]]) # Aria z-forward = +COLMAP z-forward
     
     # Apply transformation
     points_aria = points_colmap @ R_aria_colmap.T
-    # points_aria[:, 2] *= -1  # Flip X (down/up axis)
     points_aria = 0.15 * points_aria
-     # Visualize
-    # visualize_pointcloud(points_aria)
-    # points_aria = R_aria_colmap @ points_colmap
-    # exit(0)
+    
     print(f"Transformed {len(points_aria)} points to Aria world coordinates")
-    print(f"Aria world coordinate ranges:")
+    print(f"Aria world coordinate ranges (before alignment):")
     print(f"  X(down): [{points_aria[:, 0].min():.3f}, {points_aria[:, 0].max():.3f}]")
     print(f"  Y(left): [{points_aria[:, 1].min():.3f}, {points_aria[:, 1].max():.3f}]")
     print(f"  Z(forward): [{points_aria[:, 2].min():.3f}, {points_aria[:, 2].max():.3f}]")
+    
+    # Detect planes
     planes = detect_multiple_planes(points_aria, max_planes=10, min_points_per_plane=200)
     
     if not planes:
-        print("No planes detected! Using fallback method.")
-        # Fallback: assume ground is at the 10th percentile of the lowest coordinate
-        coord_ranges = [
-            (points_aria[:, 0].max() - points_aria[:, 0].min(), 0),  # X range
-            (points_aria[:, 1].max() - points_aria[:, 1].min(), 1),  # Y range  
-            (points_aria[:, 2].max() - points_aria[:, 2].min(), 2)   # Z range
-        ]
-        # The axis with largest range is likely horizontal, smallest might be vertical
-        coord_ranges.sort(reverse=True)
-        vertical_axis = coord_ranges[-1][1]  # Axis with smallest range
-        ground_level = np.percentile(points_aria[:, vertical_axis], 10)
-        # return points_aria, ground_level
+        print("No planes detected! Using original points without alignment.")
+        return points_aria
     
-    # Identify which plane is the ground
+    # Identify ground plane
     print("\nIdentifying ground plane...")
     ground_plane, ground_level = identify_ground_plane(planes, points_aria)
     
     if ground_plane is None:
-        print("Could not identify ground plane!")
-        ground_level = np.percentile(points_aria[:, 2], 10)  # Fallback
+        print("Could not identify ground plane! Using original points without alignment.")
+        return points_aria
     
-    # Visualization
-    # if visualize:
-    visualize_planes(points_aria, planes, ground_plane)
+    # Visualize BEFORE alignment
+    print("\n=== BEFORE Ground Plane Alignment ===")
+    visualize_planes(points_aria, planes, ground_plane, title_suffix=" - BEFORE Alignment")
     
-    return points_aria
-
+    # Align point cloud so ground plane becomes horizontal
+    print("\n=== Aligning Ground Plane to be Horizontal ===")
+    points_aria_aligned = align_point_cloud_to_ground_plane(points_aria, ground_plane)
+    
+    print(f"Aria world coordinate ranges (after alignment):")
+    print(f"  X(down): [{points_aria_aligned[:, 0].min():.3f}, {points_aria_aligned[:, 0].max():.3f}]")
+    print(f"  Y(left): [{points_aria_aligned[:, 1].min():.3f}, {points_aria_aligned[:, 1].max():.3f}]")
+    print(f"  Z(forward): [{points_aria_aligned[:, 2].min():.3f}, {points_aria_aligned[:, 2].max():.3f}]")
+    
+    # Visualize AFTER alignment
+    print("\n=== AFTER Ground Plane Alignment ===")
+    visualize_planes(points_aria_aligned, planes, ground_plane, title_suffix=" - AFTER Alignment")
+    # return points_aria
+    return points_aria_aligned
 
 def save_semidense_points(points_aria: np.ndarray, output_path: Path, 
                          colors: Optional[np.ndarray] = None, 
@@ -513,6 +628,7 @@ def save_semidense_points(points_aria: np.ndarray, output_path: Path,
         'px_world': points_aria[:, 0],  # X(down) in Aria world system
         'py_world': points_aria[:, 1],  # Y(left) in Aria world system  
         'pz_world': points_aria[:, 2],  # Z(forward) in Aria world system
+        
     }
     
     # Add optional columns if available
@@ -532,16 +648,17 @@ def save_semidense_points(points_aria: np.ndarray, output_path: Path,
     
     print(f"Saved {len(df)} points to {output_path}")
     print("Columns:", list(df.columns))
-    print("Coordinate system: Aria world (X-down, Y-left, Z-forward)")
+    print("Coordinate system: Aria world (X-down, Y-left, Z-forward) with aligned ground plane")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert COLMAP points3D.txt to Aria-compatible semidense_points.csv.gz")
+    parser = argparse.ArgumentParser(description="Convert COLMAP points3D.txt to Aria-compatible semidense_points.csv.gz with ground plane alignment")
     parser.add_argument("--input_path", type=Path, help="Path to COLMAP points3D.txt file")
     parser.add_argument("--output_path", type=Path, help="Path to output semidense_points.csv.gz file")
     parser.add_argument("--include-colors", action="store_true", help="Include RGB color information")
     parser.add_argument("--include-errors", action="store_true", help="Include reprojection error information")
     parser.add_argument("--max-points", type=int, default=None, help="Limit number of points (for testing)")
+    parser.add_argument("--no-alignment", action="store_true", help="Skip ground plane alignment")
     
     args = parser.parse_args()
     
@@ -563,8 +680,15 @@ def main():
         colors = colors[indices] if colors is not None else None
         errors = errors[indices] if errors is not None else None
     
-    # Transform coordinate system: COLMAP world → Aria world
-    points_aria = transform_colmap_to_aria_world(points_colmap)
+    # Transform coordinate system: COLMAP world � Aria world (with ground plane alignment)
+    if args.no_alignment:
+        print("Skipping ground plane alignment as requested")
+        # Original transformation without alignment
+        R_aria_colmap = np.array([[0,  1,  0], [1, 0,  0], [0,  0,  -1]])
+        points_aria = points_colmap @ R_aria_colmap.T
+        points_aria = 0.125 * points_aria
+    else:
+        points_aria = transform_colmap_to_aria_world(points_colmap)
     
     # Save in semidense format
     save_semidense_points(
@@ -578,9 +702,13 @@ def main():
     print(f"Input: {args.input_path}")
     print(f"Output: {args.output_path}")
     print(f"Points converted: {len(points_colmap)}")
-    print("Coordinate transformation: COLMAP world → Aria world")
+    print("Coordinate transformation: COLMAP world � Aria world")
     print("  COLMAP: X(right), Y(down), Z(forward)")
     print("  Aria:   X(down), Y(left), Z(forward)")
+    if not args.no_alignment:
+        print("Ground plane alignment: Applied (ground plane made horizontal)")
+    else:
+        print("Ground plane alignment: Skipped")
 
 
 if __name__ == "__main__":
@@ -591,9 +719,19 @@ if __name__ == "__main__":
         print()
         print("This script converts COLMAP points3D.txt to Aria-compatible semidense_points.csv.gz format")
         print("with coordinate system transformation from COLMAP world to Aria world coordinates.")
+        print("The script also detects the ground plane and rotates the entire point cloud to make it horizontal.")
         print()
         print("Coordinate Systems:")
         print("  COLMAP world: X(right), Y(down), Z(forward)")
         print("  Aria world:   X(down), Y(left), Z(forward)")
+        print()
+        print("Ground Plane Alignment:")
+        print("  - Detects the largest, most horizontal plane as the ground")
+        print("  - Rotates entire point cloud to make ground plane horizontal")
+        print("  - Use --no-alignment to skip this step")
+        print()
+        print("Additional options:")
+        print("  --no-alignment: Skip ground plane alignment")
+        print("  --max-points N: Limit to N points for testing")
     else:
         main()

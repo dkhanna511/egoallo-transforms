@@ -402,7 +402,7 @@ def detect_multiple_planes(points: np.ndarray, max_planes: int = 3, min_points_p
             # Fit plane to remaining points
             plane_normal, plane_point, inlier_mask = fit_plane_ransac(
                 remaining_points, 
-                residual_threshold=2  # 2cm threshold
+                residual_threshold=0.7  # 2cm threshold
             )
             
             inlier_points = remaining_points[inlier_mask]
@@ -612,7 +612,7 @@ def load_semidense_points_and_find_ground(points_csv_path: Path, visualize: bool
     
     # Detect multiple planes in the point cloud
     print("\nDetecting planes...")
-    planes = detect_multiple_planes(points, max_planes=5, min_points_per_plane=200)
+    planes = detect_multiple_planes(points, max_planes=10, min_points_per_plane=200)
     
     if not planes:
         print("No planes detected! Using fallback method.")
@@ -638,7 +638,7 @@ def load_semidense_points_and_find_ground(points_csv_path: Path, visualize: bool
     
     # Visualization
     # if visualize:
-    # visualize_planes(points, planes, ground_plane)
+    visualize_planes(points, planes, ground_plane)
     # exit(0)
     return points, ground_level
 

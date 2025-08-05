@@ -21,9 +21,86 @@ from egoallo.hand_detection_structs import (
 from egoallo.network import EgoDenoiseTraj
 from egoallo.transforms import SE3, SO3
 from egoallo.vis_helpers import visualize_traj_and_hand_detections
+from scipy.spatial.transform import Rotation as R
+
 
 # Import the classes from your modified inference script
 from modify_aria_inference import MP4ColmapTrajectoryPaths, load_semidense_points_and_find_ground
+
+
+def quaternion_inverse(q):
+    """Compute inverse of quaternion [qx, qy, qz, qw]"""
+    qx, qy, qz, qw = q
+    norm_sq = qx*qx + qy*qy + qz*qz + qw*qw
+    return np.array([-qx/norm_sq, -qy/norm_sq, -qz/norm_sq, qw/norm_sq])
+
+def transform_inverse(T):
+    """Compute inverse of transformation [qx, qy, qz, qw, tx, ty, tz]"""
+    q, t = T[:4], T[4:]
+    
+    # Inverse rotation
+    q_inv = quaternion_inverse(q)
+    
+    # Inverse translation: t_inv = -R_inv * t
+    r_inv = R.from_quat(q_inv)
+    t_inv = -r_inv.apply(t)
+    
+    return np.array([q_inv[0], q_inv[1], q_inv[2], q_inv[3], 
+                     t_inv[0], t_inv[1], t_inv[2]])
+
+def transform_compose(T1, T2):
+    """Compose two transformations T1 @ T2
+    Each transform is [qx, qy, qz, qw, tx, ty, tz]
+    """
+    # Extract rotation and translation
+    q1, t1 = T1[:4], T1[4:]
+    q2, t2 = T2[:4], T2[4:]
+    
+    # Convert quaternions to rotation objects
+    r1 = R.from_quat(q1)
+    r2 = R.from_quat(q2)
+    
+    # Compose rotations
+    r_composed = r1 * r2
+    q_composed = r_composed.as_quat()
+    
+    # Compose translations: t_composed = t1 + R1 * t2
+    t_composed = t1 + r1.apply(t2)
+    
+    return np.array([q_composed[0], q_composed[1], q_composed[2], q_composed[3], 
+                     t_composed[0], t_composed[1], t_composed[2]])
+
+
+# Function to convert CPF-to-World to Device-to-World (following egoallo pattern)
+def cpf_to_device_world_transform(Ts_world_cpf, T_device_cpf_param):
+    """
+    Convert CPF-to-World transformation(s) to Device-to-World transformation(s)
+    Following the egoallo pattern: T_world_device = T_world_cpf @ T_device_cpf.inverse()
+    
+    Args:
+        Ts_world_cpf: numpy array of shape (N, 7) or (7,) representing World to CPF transforms
+        T_device_cpf_param: numpy array [qx, qy, qz, qw, tx, ty, tz] representing CPF to Device transform
+    
+    Returns:
+        Ts_world_device: numpy array same shape as input representing World to Device transforms
+    """
+    # Handle both single transform and batch of transforms
+    if Ts_world_cpf.ndim == 1:
+        # Single transform case
+        T_device_cpf_inv = transform_inverse(T_device_cpf_param)
+        T_world_device = transform_compose(Ts_world_cpf, T_device_cpf_inv)
+        return T_world_device
+    else:
+        # Batch of transforms case
+        T_device_cpf_inv = transform_inverse(T_device_cpf_param)
+        Ts_world_device = []
+        
+        for i in range(Ts_world_cpf.shape[0]):
+            T_world_cpf = Ts_world_cpf[i]
+            T_world_device = transform_compose(T_world_cpf, T_device_cpf_inv)
+            Ts_world_device.append(T_world_device)
+        
+        return np.array(Ts_world_device)
 
 
 def main(
@@ -127,12 +204,26 @@ def load_and_visualize(
 
     pose_timestamps_sec = outputs["timestamps_ns"] / 1e9
 
-    # For MP4 data, we don't have device calibration, so we assume CPF == device
     Ts_world_cpf = torch.from_numpy(outputs["Ts_world_cpf"])
-    Ts_world_device = Ts_world_cpf  # Assume they're the same for MP4 data
-
+    print(" Ts_World _CPF : ", Ts_world_cpf)
+    
+    rotation_matrix_cpf_to_device = np.array([
+        [ 0, -1,  0],  # Device_x = -CPF_y (up becomes down)
+        [ 1,  0,  0],  # Device_y = CPF_x (left stays left)
+        [ 0,  0,  1]   # Device_z = CPF_z (forward stays forward)
+    ])
+    
+    rot_cpf_to_device = R.from_matrix(rotation_matrix_cpf_to_device)
+    quat_cpf_to_device = rot_cpf_to_device.as_quat()  # [qx, qy, qz, qw]
+    T_device_cpf = np.array([quat_cpf_to_device[0], quat_cpf_to_device[1], 
+                         quat_cpf_to_device[2], quat_cpf_to_device[3], 
+                         0.0, 0.0, 0.0])
+    # Ts_world_device = Ts_world_cpf  
+    Ts_world_device = cpf_to_device_world_transform(Ts_world_cpf, T_device_cpf)
+    
     # Get temporally corresponded HaMeR detections
     if paths.hamer_outputs is not None:
+        print(" am i coming here?")
         try:
             hamer_detections = CorrespondedHamerDetections.load(
                 paths.hamer_outputs,
@@ -144,6 +235,7 @@ def load_and_visualize(
             hamer_detections = None
     else:
         print("No hand detections found.")
+        # exit(0)
         hamer_detections = None
 
     # Get temporally corresponded Aria wrist and palm estimates
@@ -237,6 +329,8 @@ def load_and_visualize(
         # Load frames from the images directory
         for i in tqdm(range(image_start_index, image_end_index)):
             frame_path = paths.images_dir / f"frame_{i:06d}.jpg"
+            print(" frame_path is : ", frame_path)
+            # exit(0)
             if not frame_path.exists():
                 # Try different naming conventions
                 frame_path = paths.images_dir / f"{i:06d}.jpg"
@@ -254,7 +348,7 @@ def load_and_visualize(
                     
                 # Resize and rotate similar to original code
                 image_array = cv2.resize(
-                    image_array, (800, 800), interpolation=cv2.INTER_AREA
+                    image_array, (1920, 1080), interpolation=cv2.INTER_AREA
                 )
                 image_array = cv2.rotate(image_array, cv2.ROTATE_90_CLOCKWISE)
                 # Convert BGR to RGB for imageio
