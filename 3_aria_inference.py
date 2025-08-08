@@ -133,7 +133,8 @@ def main(args: Args) -> None:
 
     denoiser_network = load_denoiser(args.checkpoint_dir).to(device)
     body_model = fncsmpl.SmplhModel.load(args.smplh_npz_path).to(device)
-
+    print(" transformation from CPF to world is : ", Ts_world_cpf)
+    # exit(0)
     traj = run_sampling_with_stitching(
         denoiser_network,
         body_model=body_model,
@@ -148,7 +149,7 @@ def main(args: Args) -> None:
         floor_z=floor_z,
     )
     print(" ab here?")
-    exit(0)
+    # exit(0)
     # Save outputs in case we want to visualize later.
     if args.save_traj:
         save_name = (
@@ -163,6 +164,7 @@ def main(args: Args) -> None:
         )
 
         posed = traj.apply_to_body(body_model)
+        # exit(0)
         Ts_world_root = fncsmpl_extensions.get_T_world_root_from_cpf_pose(
             posed, Ts_world_cpf[..., 1:, :]
         )

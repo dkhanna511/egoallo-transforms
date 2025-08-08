@@ -35,13 +35,13 @@ def align_timestamps(frames_df, imu_df):
     # Convert timestamps to numpy arrays for faster processing
     frame_timestamps = frames_df['unix_timestamp'].values
     imu_timestamps = imu_df['timestamp'].values
-    
+    imu_timestamps_sec =imu_timestamps/1e9
     # Find nearest IMU timestamp for each frame
     aligned_imu_indices = []
     
     for frame_ts in frame_timestamps:
         # Find closest IMU timestamp
-        time_diffs = np.abs(imu_timestamps - frame_ts)
+        time_diffs = np.abs(imu_timestamps_sec - frame_ts)
         closest_idx = np.argmin(time_diffs)
         aligned_imu_indices.append(closest_idx)
         
@@ -160,6 +160,16 @@ def camera_to_world_to_world_to_device(positions_c2w, quaternions_c2w):
     
     return positions_w2d, quaternions_w2d
 
+
+def pose_matrix_from_quat_t(quat_xyzw, t):
+    """quat_xyzw = [x,y,z,w], t = [tx,ty,tz]"""
+    R_mat = R.from_quat(quat_xyzw).as_matrix()
+    T = np.eye(4)
+    T[:3, :3] = R_mat
+    T[:3, 3] = t
+    return T
+
+
 def camera_pose_to_aria(positions_c2w, quaternions_c2w):
     """
     Convert camera poses to Aria coordinate system.
@@ -174,33 +184,53 @@ def camera_pose_to_aria(positions_c2w, quaternions_c2w):
     """
     
     # Define transformation matrix from camera frame to Aria frame
-    # Camera: [X=forward, Y=left, Z=up] -> Aria: [X=right, Y=up, Z=backward]
-    R_cam_to_aria = np.array([
-        [ 0, -1,  0],  # Aria_X = -Camera_Y
-        [ 0,  0,  1],  # Aria_Y = Camera_Z
-        [-1,  0,  0]   # Aria_Z = -Camera_X
+    ### This is the transformation matrix to go from device to Camera
+    R_device_cam = np.array([
+        [ 0, 0,  -1],  # Aria_X = -Camera_Y
+        [ 0,  1,  0],  # Aria_Y = Camera_Z
+        [1,  0,  0]   # Aria_Z = -Camera_X
     ])
     
     # Convert quaternions to rotation matrices
-    R_cam = R.from_quat(quaternions_c2w).as_matrix()  # (N, 3, 3)
+    # R_world_cam = R.from_quat(quaternions_c2w).as_matrix()  # (N, 3, 3)
     
     # Apply change of basis to each rotation matrix
     # Broadcasting: (3,3) @ (N,3,3) @ (3,3) -> (N,3,3)
-    R_aria = R_cam_to_aria @ R_cam @ R_cam_to_aria.T
+    # R_aria = R_cam_to_aria @ R_cam @ R_cam_to_aria.T
     
     # Convert back to quaternions
-    quaternions_aria = R.from_matrix(R_aria).as_quat()  # (N, 4)
+    # quaternions_aria = R.from_matrix(R_aria).as_quat()  # (N, 4)
     
     # Transform translations
     # Apply the same coordinate transformation to positions
-    t_aria = (R_cam_to_aria @ positions_c2w.T).T  # (N, 3)
+    # t_aria = (R_cam_to_aria @ positions_c2w.T).T  # (N, 3)
+
+    T_cam_device = np.eye(4)
+    T_cam_device[:3, :3] = R_device_cam.T
+    
+    positions_world_device = []
+    quats_world_device = []
+    
+    for i in range(len(positions_c2w)):
+        T_world_cam = pose_matrix_from_quat_t(quaternions_c2w[i], positions_c2w[i])
+
+        # Convert: world_device = world_cam @ cam_device
+        T_world_device = T_world_cam @ T_cam_device
+        
+        quat_world_device = R.from_matrix(T_world_device[:3, :3]).as_quat()  # [x,y,z,w]
+        t_world_device = T_world_device[:3, 3]
+        quats_world_device.append(quat_world_device)
+        positions_world_device.append(t_world_device)
+    
+    return np.array(positions_world_device), np.array(quats_world_device)
+    
     
     return t_aria, quaternions_aria
 
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-def transform_to_aria_device_frame(positions_c2w, quaternions_c2w, timestamps):
+def transform_to_aria_device_frame(positions_aria, quaternions_aria, timestamps):
    """
    Transform camera-to-world poses to Aria device frame convention
    
@@ -228,48 +258,51 @@ def transform_to_aria_device_frame(positions_c2w, quaternions_c2w, timestamps):
    dt = np.append(dt, dt[-1])  # Extend dt array to match length
    
    # Calculate velocity using finite differences
-   velocity_world = np.zeros_like(positions_c2w)
-   velocity_world[1:] = np.diff(positions_c2w, axis=0) / dt[1:, np.newaxis]
+   velocity_world = np.zeros_like(positions_aria)
+   velocity_world[1:] = np.diff(positions_aria, axis=0) / dt[1:, np.newaxis]
    velocity_world[0] = velocity_world[1]  # Use second point for first
    
+    # T_world_dev = T_dev_camera @ T_cam_world
+    # T_world_dev = T_dev_camera @ T_world_cam.inv() or transpose
+    
    # Step 3: Define transformation matrix (Your world → Aria device)
-   R_aria_your = np.array([[0,  0, -1],  # Aria x-down = -your z-up
+   R_cam_to_dev = np.array([[0,  0, 1],  # Aria x-down = -your z-up
                            [0,  1,  0],  # Aria y-left = your y-left
-                           [1,  0,  0]]) # Aria z-forward = your x-forward
+                           [-1,  0,  0]]) # Aria z-forward = your x-forward
    
    # Step 4: Transform positions (world coordinates with Aria axis convention)
-   positions_aria_world = positions_c2w @ R_aria_your.T
-   
+#    positions_dev_world = positions_c2w @ R_cam_to_dev
+   positions_dev_world =  R_cam_to_dev @  positions_aria.T
    # Step 5: Transform rotations
    # Convert quaternions to rotation matrices
-   rotations_c2w = Rotation.from_quat(quaternions_c2w)
+   rotations_c2w = Rotation.from_quat(quaternions_aria)
    R_world_camera = rotations_c2w.as_matrix()
    
    # Apply coordinate system transformation to rotations
-   R_world_aria_device = R_world_camera @ R_aria_your.T
+   R_world_device = R_world_camera @ R_cam_to_dev
    
    # Convert back to quaternions
-   rotations_aria = Rotation.from_matrix(R_world_aria_device)
+   rotations_aria = Rotation.from_matrix(R_world_device)
    quaternions_aria = rotations_aria.as_quat()  # [qx, qy, qz, qw]
    
    # Step 6: Transform velocities to device frame
-   velocity_device = velocity_world @ R_aria_your.T
+#    velocity_device = velocity_world @ R_aria_your.T
    
    # Step 7: Return results
    return {
        # Device-to-world poses (Aria format)
-       'tx_world_device': positions_aria_world[:, 0],
-       'ty_world_device': positions_aria_world[:, 1], 
-       'tz_world_device': positions_aria_world[:, 2],
+       'tx_world_device': positions_aria[:, 0],
+       'ty_world_device': positions_aria[:, 1], 
+       'tz_world_device': positions_aria[:, 2],
        'qx_world_device': quaternions_aria[:, 0],
        'qy_world_device': quaternions_aria[:, 1],
        'qz_world_device': quaternions_aria[:, 2],
        'qw_world_device': quaternions_aria[:, 3],
        
        # Device velocities in device frame (Aria format)
-       'device_linear_velocity_x_device': velocity_device[:, 0],
-       'device_linear_velocity_y_device': velocity_device[:, 1],
-       'device_linear_velocity_z_device': velocity_device[:, 2]
+       'device_linear_velocity_x_device': velocity_world[:, 0],
+       'device_linear_velocity_y_device': velocity_world[:, 1],
+       'device_linear_velocity_z_device': velocity_world[:, 2]
    }
 
 def transform_angular_velocity_iphone_to_aria(omega_iphone):
@@ -287,7 +320,7 @@ def transform_angular_velocity_iphone_to_aria(omega_iphone):
         [-1,  0,  0],  # Y_left
         [ 0,  0, -1]   # Z_forward
     ])
-    return omega_iphone @ R_iphone_to_aria.T
+    return omega_iphone @ R_iphone_to_aria
 
 
 def create_closed_loop_trajectory(frames_df, egomotion_df, aligned_imu_df):
@@ -303,11 +336,17 @@ def create_closed_loop_trajectory(frames_df, egomotion_df, aligned_imu_df):
     merged_df = frames_df.merge(egomotion_df, left_on='frame_idx', right_on='frame_ID', how='inner')
     print(f"Merged data has {len(merged_df)} frames")
 
+
+
     # Extract camera-to-world position and orientation
     positions_c2w = merged_df[['X_world', 'Y_world', 'Z_world']].values
     quaternions_c2w = merged_df[['quat_X', 'quat_Y', 'quat_Z', 'quat_W']].values
     device_angular_velocities = aligned_imu_df[['omega_x', 'omega_y', 'omega_z']].values
     
+    
+    print(f"\nFirst 3 rows of inputs:")
+    print(merged_df.head(3)[['X_world', 'Y_world', 'Z_world']].to_string())
+        
     timestamps = merged_df['unix_timestamp'].values
 
     print(f"Original camera-to-world poses:")

@@ -146,12 +146,19 @@ def visualize_traj_and_hand_detections(
 
     timesteps = Ts_world_cpf.shape[0]
 
+    # server.scene.add_grid(
+    #     "/ground",
+    #     plane="xy",
+    #     cell_color=(80, 80, 80),
+    #     section_color=(50, 50, 50),
+    #     position=(0.0, 0.0, floor_z),
+    # )
     server.scene.add_grid(
         "/ground",
         plane="xy",
         cell_color=(80, 80, 80),
         section_color=(50, 50, 50),
-        position=(0.0, 0.0, floor_z),
+        position=(0.0, 0.0, 0),
     )
 
     if points_data is not None:

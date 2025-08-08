@@ -74,8 +74,9 @@ def run_sampling_with_stitching(
     # denoiser network. All of the network outputs are local, so we don't need to
     # unoffset when returning.
     Ts_world_cpf_shifted = Ts_world_cpf.clone()
-    Ts_world_cpf_shifted[..., 6] -= floor_z
-
+    # Ts_world_cpf_shifted[..., 6] += floor_z
+    Ts_world_cpf_shifted[..., 6] -= 0 
+    
     noise_constants = CosineNoiseScheduleConstants.compute(timesteps=1000).to(
         device=device
     )

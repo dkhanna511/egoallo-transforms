@@ -129,7 +129,8 @@ class InferenceInputTransforms(TensorDataclass):
         provider = create_vrs_data_provider(str(vrs_path))
         device_calib = provider.get_device_calibration()
         T_device_cpf = device_calib.get_transform_device_cpf().to_matrix()
-        print(" T Device CPF crossing : ")
+        print(" T Device CPF  : ", T_device_cpf)
+        # exit(0)
         # Get downsampled CPF frames.
         aria_fps = len(closed_loop_traj) / (
             closed_loop_traj[-1].tracking_timestamp.total_seconds()
@@ -147,14 +148,15 @@ class InferenceInputTransforms(TensorDataclass):
         for i in range(0, num_poses, int(aria_fps // fps)):
             T_world_device = closed_loop_traj[i].transform_world_device.to_matrix()
             print(" closed loop trajectory full is : \n", closed_loop_traj[i])
+            print("T_World_device is : ", T_world_device)
             # exit(0)
-            print("\nclosed loop trajectory matrix :\n", closed_loop_traj[i].transform_world_device.to_matrix())
+            # print("\nclosed loop trajectory matrix :\n", closed_loop_traj[i].transform_world_device.to_matrix())
             assert T_world_device.shape == (4, 4)
             Ts_world_device.append(T_world_device)
-            print(" T  CPF to Device :", T_device_cpf)
+            # print(" T  CPF to Device :", T_device_cpf)
             # exit(0)
             val = T_world_device @ T_device_cpf
-            print("val is : \n ", val)
+            # print("val is : \n ", val)
             Ts_world_cpf.append(T_world_device @ T_device_cpf)
             out_timestamps_secs.append(
                 closed_loop_traj[i].tracking_timestamp.total_seconds()

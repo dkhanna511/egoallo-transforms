@@ -72,7 +72,7 @@ def transform_compose(T1, T2):
 
 
 # Function to convert CPF-to-World to Device-to-World (following egoallo pattern)
-def cpf_to_device_world_transform(Ts_world_cpf, T_device_cpf_param):
+def cpf_to_device_world_transform(Ts_world_cpf, T_cpf_device_param):
     """
     Convert CPF-to-World transformation(s) to Device-to-World transformation(s)
     Following the egoallo pattern: T_world_device = T_world_cpf @ T_device_cpf.inverse()
@@ -207,19 +207,46 @@ def load_and_visualize(
     Ts_world_cpf = torch.from_numpy(outputs["Ts_world_cpf"])
     print(" Ts_World _CPF : ", Ts_world_cpf)
     
-    rotation_matrix_cpf_to_device = np.array([
-        [ 0, -1,  0],  # Device_x = -CPF_y (up becomes down)
-        [ 1,  0,  0],  # Device_y = CPF_x (left stays left)
-        [ 0,  0,  1]   # Device_z = CPF_z (forward stays forward)
-    ])
+    # rotation_matrix_device_to_cpf = np.array([
+    #     [ 0, -1,  0],  # Device_x = -CPF_y (up becomes down)
+    #     [ 1,  0,  0],  # Device_y = CPF_x (left stays left)
+    #     [ 0,  0,  1]   # Device_z = CPF_z (forward stays forward)
+    # ])
     
-    rot_cpf_to_device = R.from_matrix(rotation_matrix_cpf_to_device)
-    quat_cpf_to_device = rot_cpf_to_device.as_quat()  # [qx, qy, qz, qw]
-    T_device_cpf = np.array([quat_cpf_to_device[0], quat_cpf_to_device[1], 
-                         quat_cpf_to_device[2], quat_cpf_to_device[3], 
-                         0.0, 0.0, 0.0])
+    # rot_cpf_to_device = R.from_matrix(rotation_matrix_device_to_cpf)
+    # quat_cpf_to_device = rot_cpf_to_device.as_quat()  # [qx, qy, qz, qw]
+    # T_cpf_device = np.array([quat_cpf_to_device[0], quat_cpf_to_device[1], 
+    #                      quat_cpf_to_device[2], quat_cpf_to_device[3], 
+    #                      0.0, 0.0, 0.0])
+    
+    # T_device_cpf_np = np.array([
+    #         [-3.18601373e-02, -9.98629532e-01, -4.15209507e-02,  4.99302002e-03],
+    #         [ 7.93353401e-01,  1.74815473e-09, -6.08761350e-01, -5.14600901e-02],
+    #         [ 6.07927062e-01, -5.23360076e-02,  7.92266136e-01, -4.99498807e-02],
+    #         [ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  1.00000000e+00]])
+    
+    
+    # # Extract R and t
+    # R = T_device_cpf_np[:3, :3]
+    # t = T_device_cpf_np[:3, 3]
+
+    # # Convert rotation to quaternion (w,x,y,z)
+    # from scipy.spatial.transform import Rotation as Rscipy
+    # quat = Rscipy.from_matrix(R).as_quat()  # returns [x,y,z,w]
+
+    # # Reorder to [w,x,y,z]
+    # quat_wxyz = np.roll(quat, 1)
+
+    # # Build wxyz_xyz format
+    # wxyz_xyz = np.hstack([quat_wxyz, t])[None, :]  # shape (1,7)
+    # T_device_cpf = SE3(torch.from_numpy(wxyz_xyz))
+
     # Ts_world_device = Ts_world_cpf  
-    Ts_world_device = cpf_to_device_world_transform(Ts_world_cpf, T_device_cpf)
+    # Ts_world_device = cpf_to_device_world_transform(Ts_world_cpf, T_cpf_device)
+    # Ts_world_device = (
+    #     SE3(torch.from_numpy(outputs["Ts_world_cpf"])) @ T_device_cpf.inverse()
+    # ).wxyz_xyz
+    
     
     # Get temporally corresponded HaMeR detections
     if paths.hamer_outputs is not None:
@@ -239,24 +266,24 @@ def load_and_visualize(
         hamer_detections = None
 
     # Get temporally corresponded Aria wrist and palm estimates
-    if paths.wrist_and_palm_poses_csv is not None:
-        try:
-            aria_detections = CorrespondedAriaHandWristPoseDetections.load(
-                paths.wrist_and_palm_poses_csv,
-                pose_timestamps_sec,
-                Ts_world_device=Ts_world_device.numpy(),
-            )
-            print("Loaded Aria hand detections")
-        except Exception as e:
-            print(f"Warning: Could not load Aria hand detections: {e}")
-            aria_detections = None
-    else:
-        aria_detections = None
+    # if paths.wrist_and_palm_poses_csv is not None:
+    #     try:
+    #         aria_detections = CorrespondedAriaHandWristPoseDetections.load(
+    #             paths.wrist_and_palm_poses_csv,
+    #             pose_timestamps_sec,
+    #             Ts_world_device=Ts_world_device.numpy(),
+    #         )
+    #         print("Loaded Aria hand detections")
+    #     except Exception as e:
+    #         print(f"Warning: Could not load Aria hand detections: {e}")
+    #         aria_detections = None
+    # else:
+    aria_detections = None
 
-    if paths.splat_path is not None:
-        print("Found splat at", paths.splat_path)
-    else:
-        print("No scene splat found.")
+    # if paths.splat_path is not None:
+    #     print("Found splat at", paths.splat_path)
+    # else:
+    #     print("No scene splat found.")
 
     # Get point cloud + floor
     points_data, floor_z = load_semidense_points_and_find_ground(paths.points_csv_path)
@@ -279,7 +306,7 @@ def load_and_visualize(
                         outputs["left_hand_quats"],
                         outputs["right_hand_quats"],
                     ],
-                    axis=-2,
+                    axis=2,
                 )
             ).to(device)
         ).as_matrix(),
@@ -382,9 +409,11 @@ def load_and_visualize(
             print(f"Error creating video: {e}")
             # Return empty bytes if video creation fails
             return b""
-            
         return output.getvalue()
 
+    print(f"floor_z being passed to sampling: {floor_z}")
+    # print(f"Camera heights: {cpf_translations[:, 1]}")
+    # print(f"Difference: {cpf_translations[:, 1] - floor_z}")
     return visualize_traj_and_hand_detections(
         server,
         Ts_world_cpf,

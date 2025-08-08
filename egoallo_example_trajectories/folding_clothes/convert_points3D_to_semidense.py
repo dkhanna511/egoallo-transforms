@@ -205,6 +205,7 @@ def detect_multiple_planes(points: np.ndarray, max_planes: int = 3, min_points_p
     planes = []
     remaining_points = points.copy()
     remaining_indices = np.arange(len(points))
+    all_plane_indices = set()  # Track all points that belong to any plane
     
     for i in range(max_planes):
         if len(remaining_points) < min_points_per_plane:
@@ -214,7 +215,7 @@ def detect_multiple_planes(points: np.ndarray, max_planes: int = 3, min_points_p
             # Fit plane to remaining points
             plane_normal, plane_point, inlier_mask = fit_plane_ransac(
                 remaining_points, 
-                residual_threshold=0.7  # 2cm threshold
+                residual_threshold=0.05 # 2cm threshold
             )
             
             inlier_points = remaining_points[inlier_mask]
@@ -227,6 +228,8 @@ def detect_multiple_planes(points: np.ndarray, max_planes: int = 3, min_points_p
             
             # Store plane info with original indices
             original_inlier_indices = remaining_indices[inlier_mask]
+            all_plane_indices.update(original_inlier_indices)  # Add to set of plane points
+            
             planes.append({
                 'normal': plane_normal,
                 'point': plane_point,
@@ -246,7 +249,20 @@ def detect_multiple_planes(points: np.ndarray, max_planes: int = 3, min_points_p
             print(f"Could not fit plane {i+1}: {e}")
             break
     
-    return planes
+    # Create outlier mask
+    outlier_mask = np.ones(len(points), dtype=bool)
+    outlier_mask[list(all_plane_indices)] = False
+    
+    # Separate inlier and outlier points
+    inlier_points = points[~outlier_mask]
+    outlier_points = points[outlier_mask]
+    
+    print(f"\nOutlier removal summary:")
+    print(f"  Total points: {len(points)}")
+    print(f"  Points in planes: {len(inlier_points)} ({100*len(inlier_points)/len(points):.1f}%)")
+    print(f"  Outlier points: {len(outlier_points)} ({100*len(outlier_points)/len(points):.1f}%)")
+    
+    return planes, outlier_mask, inlier_points, outlier_points
 
 def identify_ground_plane(planes: list, points: np.ndarray) -> Tuple[Optional[dict], float]:
     """
@@ -420,14 +436,17 @@ def align_point_cloud_to_ground_plane(points: np.ndarray, ground_plane: dict,
     
     return aligned_points
 
-def visualize_planes(points: np.ndarray, planes: list, ground_plane: Optional[dict] = None, title_suffix: str = ""):
+def visualize_planes(points: np.ndarray, planes: list, outlier_mask: np.ndarray, ground_plane: Optional[dict] = None, title_suffix: str = ""):
     """Visualize the point cloud and detected planes with rectangle overlay on ground."""
+    """Visualize the point cloud, detected planes, and outliers."""
     fig = plt.figure(figsize=(15, 10))
     ax = fig.add_subplot(111, projection='3d')
     
-    # Plot all points in gray
-    ax.scatter(points[:, 0], points[:, 1], points[:, 2], 
-              c='gray', alpha=0.2, s=1, label='All points')
+    # Plot outlier points in gray
+    outlier_points = points[outlier_mask]
+    if len(outlier_points) > 0:
+        ax.scatter(outlier_points[:, 0], outlier_points[:, 1], outlier_points[:, 2], 
+                  c='gray', alpha=0.3, s=1, label=f'Outliers ({len(outlier_points)})')
     
     # Plot each plane with different colors
     colors = ['red', 'blue', 'green', 'orange', 'purple']
@@ -441,7 +460,7 @@ def visualize_planes(points: np.ndarray, planes: list, ground_plane: Optional[di
         else:
             inlier_points = plane['inlier_points']
         
-        label = f"Plane {i+1} (area: {plane['area']:.1f})"
+        label = f"Plane {i+1} ({len(inlier_points)} pts, area: {plane['area']:.1f})"
         if ground_plane and plane is ground_plane:
             label += " - GROUND"
             
@@ -493,7 +512,7 @@ def visualize_planes(points: np.ndarray, planes: list, ground_plane: Optional[di
     ax.set_ylabel('Y (py_world)')  
     ax.set_zlabel('Z (pz_world)')
     ax.legend()
-    title = f'Point Cloud with Detected Planes (Area-Based Ground Detection){title_suffix}'
+    title = f'Point Cloud with Outlier Removal{title_suffix}'
     ax.set_title(title)
     
     # Set equal aspect ratio
@@ -509,7 +528,7 @@ def visualize_planes(points: np.ndarray, planes: list, ground_plane: Optional[di
     
     plt.tight_layout()
     plt.show()
-
+    
 def visualize_pointcloud(points: np.ndarray, title="Point Cloud (Aria World)"):
     """
     Visualize a 3D point cloud with matplotlib.
@@ -553,61 +572,67 @@ def transform_colmap_to_aria_world(points_colmap: np.ndarray) -> np.ndarray:
     Returns:
         points_aria_aligned: (N, 3) points in Aria world coordinates with ground plane aligned
     """
-    print("Transforming coordinate system: COLMAP world � Aria world")
-    print("  COLMAP: X(right), Y(down), Z(forward)")
-    print("  Aria:   X(down), Y(left), Z(forward)")
-    
-    # Transformation matrix: COLMAP world � Aria world
-    # Aria x-down = +COLMAP y-down
-    # Aria y-left = -COLMAP x-right  
-    # Aria z-forward = +COLMAP z-forward
+    # Transformation matrix: COLMAP world → Aria world
     R_aria_colmap = np.array([[0,  1,  0],  # Aria x-down = +COLMAP y-down
                               [-1, 0,  0],  # Aria y-left = -COLMAP x-right  
                               [0,  0,  -1]]) # Aria z-forward = +COLMAP z-forward
     
     # Apply transformation
     points_aria = points_colmap @ R_aria_colmap.T
-    points_aria = 0.15 * points_aria
+    points_aria = 0.12 * points_aria
+    
     
     print(f"Transformed {len(points_aria)} points to Aria world coordinates")
-    print(f"Aria world coordinate ranges (before alignment):")
-    print(f"  X(down): [{points_aria[:, 0].min():.3f}, {points_aria[:, 0].max():.3f}]")
-    print(f"  Y(left): [{points_aria[:, 1].min():.3f}, {points_aria[:, 1].max():.3f}]")
-    print(f"  Z(forward): [{points_aria[:, 2].min():.3f}, {points_aria[:, 2].max():.3f}]")
     
-    # Detect planes
-    planes = detect_multiple_planes(points_aria, max_planes=10, min_points_per_plane=200)
+    # Detect planes WITH outlier removal
+    planes, outlier_mask, inlier_points, outlier_points = detect_multiple_planes(
+        points_aria, max_planes=10, min_points_per_plane=200
+    )
     
     if not planes:
-        print("No planes detected! Using original points without alignment.")
-        return points_aria
+        print("No planes detected! Using original points without cleaning.")
+        return points_aria, np.zeros(len(points_aria), dtype=bool)
     
     # Identify ground plane
     print("\nIdentifying ground plane...")
     ground_plane, ground_level = identify_ground_plane(planes, points_aria)
     
     if ground_plane is None:
-        print("Could not identify ground plane! Using original points without alignment.")
-        return points_aria
+        print("Could not identify ground plane! Using inlier points without alignment.")
+        return inlier_points, outlier_mask
     
-    # Visualize BEFORE alignment
-    print("\n=== BEFORE Ground Plane Alignment ===")
-    visualize_planes(points_aria, planes, ground_plane, title_suffix=" - BEFORE Alignment")
+    # Visualize BEFORE alignment (with outliers highlighted)
+    print("\n=== BEFORE Ground Plane Alignment (with outliers) ===")
+    visualize_planes(points_aria, planes, outlier_mask, ground_plane, title_suffix=" - BEFORE Alignment")
     
-    # Align point cloud so ground plane becomes horizontal
+    # Align point cloud so ground plane becomes horizontal (using ALL points for consistent transformation)
     print("\n=== Aligning Ground Plane to be Horizontal ===")
     points_aria_aligned = align_point_cloud_to_ground_plane(points_aria, ground_plane)
     
-    print(f"Aria world coordinate ranges (after alignment):")
-    print(f"  X(down): [{points_aria_aligned[:, 0].min():.3f}, {points_aria_aligned[:, 0].max():.3f}]")
-    print(f"  Y(left): [{points_aria_aligned[:, 1].min():.3f}, {points_aria_aligned[:, 1].max():.3f}]")
-    print(f"  Z(forward): [{points_aria_aligned[:, 2].min():.3f}, {points_aria_aligned[:, 2].max():.3f}]")
+    # Remove outliers AFTER alignment
+    points_aria_cleaned = points_aria_aligned[~outlier_mask]
     
-    # Visualize AFTER alignment
-    print("\n=== AFTER Ground Plane Alignment ===")
-    visualize_planes(points_aria_aligned, planes, ground_plane, title_suffix=" - AFTER Alignment")
-    # return points_aria
-    return points_aria_aligned
+    print(f"Final cleaned point cloud:")
+    print(f"  Original points: {len(points_aria)}")
+    print(f"  After outlier removal: {len(points_aria_cleaned)}")
+    print(f"  Removed: {len(points_aria) - len(points_aria_cleaned)} outliers")
+    
+    print(f"Aria world coordinate ranges (after cleaning and alignment):")
+    print(f"  X(down): [{points_aria_cleaned[:, 0].min():.3f}, {points_aria_cleaned[:, 0].max():.3f}]")
+    print(f"  Y(left): [{points_aria_cleaned[:, 1].min():.3f}, {points_aria_cleaned[:, 1].max():.3f}]")
+    print(f"  Z(forward): [{points_aria_cleaned[:, 2].min():.3f}, {points_aria_cleaned[:, 2].max():.3f}]")
+    
+    # Visualize AFTER alignment and cleaning
+    print("\n=== AFTER Ground Plane Alignment and Outlier Removal ===")
+    visualize_planes(points_aria_aligned, planes, outlier_mask, ground_plane, 
+                                  title_suffix=" - AFTER Alignment")
+    
+    visualize_planes(points_aria_aligned, planes, outlier_mask, ground_plane, 
+                                  title_suffix=" - AFTER Alignment")
+    
+    
+    return points_aria_cleaned, outlier_mask
+
 
 def save_semidense_points(points_aria: np.ndarray, output_path: Path, 
                          colors: Optional[np.ndarray] = None, 
@@ -659,7 +684,8 @@ def main():
     parser.add_argument("--include-errors", action="store_true", help="Include reprojection error information")
     parser.add_argument("--max-points", type=int, default=None, help="Limit number of points (for testing)")
     parser.add_argument("--no-alignment", action="store_true", help="Skip ground plane alignment")
-    
+    parser.add_argument("--no-outlier-removal", action="store_true", help="Skip outlier removal")
+
     args = parser.parse_args()
     
     # Validate input file
@@ -681,15 +707,29 @@ def main():
         errors = errors[indices] if errors is not None else None
     
     # Transform coordinate system: COLMAP world � Aria world (with ground plane alignment)
-    if args.no_alignment:
-        print("Skipping ground plane alignment as requested")
-        # Original transformation without alignment
-        R_aria_colmap = np.array([[0,  1,  0], [1, 0,  0], [0,  0,  -1]])
-        points_aria = points_colmap @ R_aria_colmap.T
-        points_aria = 0.125 * points_aria
+    # Transform coordinate system with outlier removal
+    if args.no_outlier_removal or args.no_alignment:
+        print("Using original transformation without outlier removal")
+        # Use original function
+        if args.no_alignment:
+            R_aria_colmap = np.array([[0,  1,  0], 
+                                      [-1, 0,  0], 
+                                      [0,  0,  -1]])
+            points_aria =  R_aria_colmap @ points_aria
+            points_aria = 0.13 * points_aria
+        else:
+            points_aria = transform_colmap_to_aria_world(points_colmap)
+        outlier_mask = np.zeros(len(points_colmap), dtype=bool)
     else:
-        points_aria = transform_colmap_to_aria_world(points_colmap)
-    
+        points_aria, outlier_mask = transform_colmap_to_aria_world(points_colmap)
+        
+        # Also remove corresponding colors and errors for outliers
+        if colors is not None:
+            colors = colors[~outlier_mask]
+        if errors is not None:
+            errors = errors[~outlier_mask]
+            
+            
     # Save in semidense format
     save_semidense_points(
         points_aria, 

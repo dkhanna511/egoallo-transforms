@@ -146,6 +146,11 @@ def load_and_visualize(
             device_calib.get_transform_device_cpf().to_quat_and_translation()
         )
     )
+    
+    print(SE3(torch.from_numpy(device_calib.get_transform_device_cpf().to_matrix())))
+    
+    print("T_device_cpf is : ", T_device_cpf)
+    # exit(0)
     assert T_device_cpf.wxyz_xyz.shape == (1, 7)
     pose_timestamps_sec = outputs["timestamps_ns"] / 1e9
 
